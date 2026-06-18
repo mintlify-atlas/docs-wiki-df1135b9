@@ -1,0 +1,586 @@
+---
+title: "Templates and Bundling: abp new and abp bundle End to End"
+sidebarTitle: "Templates & Bundling"
+description: "The full path from abp new to a deployable solution — template fetch, in-memory pipeline, extraction, and the post-creation BundleCommand for Blazor."
+---
+
+The two ABP Framework CLI commands that read the most user time are `abp new` and `abp bundle`. Both share machinery that is split between three namespaces: `Volo.Abp.Cli.Commands` (the surface), `Volo.Abp.Cli.ProjectBuilding` (template fetch and pipeline), and `Volo.Abp.Cli.Bundling` (Blazor asset orchestration). This page walks the full happy-path: how `NewCommand` builds a `ProjectBuildArgs`, how the source-code store materialises a template ZIP, how the in-memory pipeline mutates it, how the result is written to disk, and how `BundleCommand` then composes script/style references for the freshly-scaffolded Blazor app.
+
+## Two commands, one orchestrator
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/NewCommand.cs` and `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/BundleCommand.cs` are both `IConsoleCommand` implementations registered in `AbpCliOptions.Commands` (see [/cli/command-selector](/cli/command-selector)). `NewCommand` derives from `ProjectCreationCommandBase`, which carries the bundling step as a virtual hook so subclasses can override it. `BundleCommand` is standalone and is also injected directly into `ProjectCreationCommandBase` so `abp new` can call it without re-resolving via DI.
+
+```csharp
+public class NewCommand : ProjectCreationCommandBase, IConsoleCommand, ITransientDependency
+{
+    public const string Name = "new";
+
+    protected TemplateProjectBuilder TemplateProjectBuilder { get; }
+    public ITemplateInfoProvider TemplateInfoProvider { get; }
+    // ...
+}
+
+public class BundleCommand : IConsoleCommand, ITransientDependency
+{
+    public const string Name = "bundle";
+
+    public IBundlingService BundlingService { get; set; }
+    // ...
+}
+```
+
+## `abp new` — the surface
+
+`NewCommand.ExecuteAsync` does five things in order: validate the project name, resolve the template, build a `ProjectBuildArgs`, run the project builder, and then perform post-creation steps (extract zip, install libs, bundle, configure PWA, open the docs page).
+
+```csharp
+public async Task ExecuteAsync(CommandLineArgs commandLineArgs)
+{
+    var projectName = NamespaceHelper.NormalizeNamespace(commandLineArgs.Target);
+    if (string.IsNullOrWhiteSpace(projectName))
+    {
+        throw new CliUsageException("Project name is missing!" +
+            Environment.NewLine + Environment.NewLine + GetUsageInfo());
+    }
+
+    ProjectNameValidator.Validate(projectName);
+
+    Logger.LogInformation("Creating your project...");
+    Logger.LogInformation("Project name: " + projectName);
+
+    var template = commandLineArgs.Options.GetOrNull(Options.Template.Short, Options.Template.Long);
+    if (template != null)
+    {
+        Logger.LogInformation("Template: " + template);
+    }
+    else
+    {
+        template = (await TemplateInfoProvider.GetDefaultAsync()).Name;
+    }
+
+    var projectArgs = await GetProjectBuildArgsAsync(commandLineArgs, template, projectName);
+
+    await CheckCreatingRequirements(projectArgs);
+
+    var result = await TemplateProjectBuilder.BuildAsync(projectArgs);
+
+    // ...telemetry, then post-creation hooks...
+    ExtractProjectZip(result, projectArgs.OutputFolder);
+}
+```
+
+The help text exposes the option surface:
+
+```text
+abp new <project-name> [options]
+
+-t|--template <template-name>               (default: app)
+-u|--ui <ui-framework>                      (if supported by the template)
+-m|--mobile <mobile-framework>              (if supported by the template)
+-d|--database-provider <database-provider>  (if supported by the template)
+-o|--output-folder <output-folder>          (default: current folder)
+-v|--version <version>                      (default: latest version)
+--preview                                   (Use latest pre-release version if there is at least one)
+-ts|--template-source <template-source>     (your local or network abp template source)
+-csf|--create-solution-folder               (default: true)
+-cs|--connection-string <connection-string> (your database connection string)
+--dbms <database-management-system>         (your database management system)
+--theme <theme-name>                        (default: leptonx-lite)
+--tiered                                    (if supported by the template)
+--no-ui                                     (if supported by the template)
+--no-random-port                            (Use template's default ports)
+--separate-auth-server                      (if supported by the template)
+--local-framework-ref --abp-path <your-local-abp-repo-path>
+-sib|--skip-installing-libs
+-sb|--skip-bundling
+-sc|--skip-cache
+```
+
+Each option ultimately reaches the build pipeline through either a strongly-typed property on `ProjectBuildArgs` (see [/cli/project-building](/cli/project-building)) or via `args.ExtraProperties` for free-form flags like `--preview`, `--local-framework-ref`, and `--tiered`.
+
+## Picking a default template
+
+When the user does not pass `-t`, `NewCommand` asks `ITemplateInfoProvider.GetDefaultAsync` for the suggested template. The default implementation in `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/TemplateInfoProvider.cs` returns the pro template when the user is logged in and entitled, otherwise the open-source one:
+
+```csharp
+public async Task<TemplateInfo> GetDefaultAsync()
+{
+    var defaultTemplateName = await CheckProLicenseAsync()
+        ? AppProTemplate.TemplateName
+        : AppTemplate.TemplateName;
+
+    return Get(defaultTemplateName);
+}
+
+public TemplateInfo Get(string name)
+{
+    switch (name)
+    {
+        case AppTemplate.TemplateName:        return new AppTemplate();
+        case AppNoLayersTemplate.TemplateName: return new AppNoLayersTemplate();
+        case AppNoLayersProTemplate.TemplateName: return new AppNoLayersProTemplate();
+        case AppProTemplate.TemplateName:     // ...
+        // ...one case per template family
+    }
+}
+```
+
+Every template name is a `const` field on the corresponding subclass under `ProjectBuilding/Templates/`. For example `AppTemplate` is the layered open-source web app:
+
+```csharp
+public class AppTemplate : AppTemplateBase
+{
+    public const string TemplateName = "app";
+
+    public const Theme DefaultTheme = Theme.LeptonXLite;
+
+    public AppTemplate()
+        : base(TemplateName)
+    {
+        DocumentUrl = CliConsts.DocsLink + "latest/solution-templates/layered-web-application";
+    }
+}
+```
+
+`TemplateInfo.GetCustomSteps(context)` is the extensibility point each template uses to inject its own `ProjectBuildPipelineStep` instances (see [/cli/project-building](/cli/project-building) for the pipeline surface). See [/templates/overview](/templates/overview) for the broader template catalogue.
+
+## Fetching the template ZIP
+
+`TemplateProjectBuilder.BuildAsync` (in `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/TemplateProjectBuilder.cs`) calls `ISourceCodeStore.GetAsync` to obtain the template archive:
+
+```csharp
+var templateFile = await SourceCodeStore.GetAsync(
+    args.TemplateName,
+    SourceCodeTypes.Template,
+    args.Version,
+    args.TemplateSource,
+    args.ExtraProperties.ContainsKey(NewCommand.Options.Preview.Long),
+    trustUserVersion: args.TrustUserVersion);
+```
+
+The default implementation in `AbpIoSourceCodeStore.cs` performs three things:
+
+1. Caches templates under `~/.abp/templates` (path resolved by `CliPaths.TemplateCache`).
+2. Falls back to the cached file when the remote service is unreachable.
+3. Warns when the requested template version differs from the installed CLI version in `major.minor`.
+
+```csharp
+public async Task<TemplateFile> GetAsync(
+    string name,
+    string type,
+    string version = null,
+    string templateSource = null,
+    bool includePreReleases = false,
+    bool skipCache = false,
+    bool trustUserVersion = false)
+{
+    DirectoryHelper.CreateIfNotExists(CliPaths.TemplateCache);
+    var userSpecifiedVersion = version != null;
+    var latestVersion = version ?? await GetLatestSourceCodeVersionAsync(
+        name, type, null, includePreReleases);
+    // ...
+}
+```
+
+When `args.TemplateSource` is set the store reads from a local folder or a network share instead of `https://abp.io/`, which is how `--template-source` lets ABP team members test pre-release templates from a build server.
+
+## The in-memory pipeline
+
+After the ZIP has been resolved, `TemplateProjectBuilder.BuildAsync` constructs a `ProjectBuildContext`, lets `TemplateProjectBuildPipelineBuilder.Build` populate it with the right `ProjectBuildPipelineStep` list, and executes the pipeline. The pipeline mutates `context.Files` in memory and produces `context.Result.ZipContent`. The whole sequence is covered in detail in [/cli/project-building](/cli/project-building); the key callout for this page is that the output of `BuildAsync` is a `ProjectBuildResult` carrying *bytes*, not a folder:
+
+```csharp
+return new ProjectBuildResult(context.Result.ZipContent, args.SolutionName.ProjectName);
+```
+
+`NewCommand.ExtractProjectZip` then unpacks `result.ZipContent` to `args.OutputFolder` using `ICSharpCode.SharpZipLib`. Because the pipeline is in-memory, dry-runs and tests can run the same code without touching disk.
+
+## Post-creation hooks
+
+Once the zip is extracted, `NewCommand.ExecuteAsync` runs several follow-ups. The relevant ones for this page are `RunInstallLibsForWebTemplateAsync` (which feeds into [/cli/install-libs](/cli/install-libs)) and `RunBundleInternalAsync` (which calls the bundling service):
+
+```csharp
+var skipInstallLibs = commandLineArgs.Options.ContainsKey(Options.SkipInstallingLibs.Long)
+                   || commandLineArgs.Options.ContainsKey(Options.SkipInstallingLibs.Short);
+if (!skipInstallLibs)
+{
+    await RunInstallLibsForWebTemplateAsync(projectArgs);
+    ConfigureAngularJsonForThemeSelection(projectArgs);
+}
+
+var skipBundling = commandLineArgs.Options.ContainsKey(Options.SkipBundling.Long)
+                || commandLineArgs.Options.ContainsKey(Options.SkipBundling.Short);
+if (!skipBundling)
+{
+    await RunBundleInternalAsync(projectArgs);
+}
+
+await ConfigurePwaSupportForAngular(projectArgs);
+```
+
+`RunBundleInternalAsync` is defined on `ProjectCreationCommandBase` (the parent of `NewCommand`) and it selects the right Blazor project to bundle:
+
+```csharp
+protected virtual async Task RunBundleInternalAsync(ProjectBuildArgs projectArgs)
+{
+    if (!ShouldRunBundleCommand(projectArgs))
+    {
+        return;
+    }
+
+    var isModuleTemplate = ModuleTemplateBase.IsModuleTemplate(projectArgs.TemplateName);
+    var isWebassembly = projectArgs.UiFramework == UiFramework.Blazor;
+
+    var projectType = isWebassembly || isModuleTemplate
+        ? BundlingConsts.WebAssembly
+        : BundlingConsts.MauiBlazor;
+
+    var searchPattern = isWebassembly ? "*.Blazor.csproj" : "*.MauiBlazor.csproj";
+    var path = projectArgs.OutputFolder;
+
+    if (isWebassembly && Directory.GetFiles(path, "*.Blazor.Client.csproj", SearchOption.AllDirectories).Any())
+    {
+        searchPattern = "*.Blazor.Client.csproj";
+    }
+
+    if (isModuleTemplate)
+    {
+        path = Path.Combine(path, "host");
+        searchPattern = "*.Blazor.Host.csproj";
+        // ...
+    }
+    // ...resolve the working directory, then call IBundlingService.BundleAsync
+}
+```
+
+The branching reflects that ABP templates put the Blazor entry point in different folders depending on whether it is a module template (`host/`), a microservice (`apps/`), or a standalone (`src/MyApp.Blazor/`).
+
+## `abp bundle` — the standalone surface
+
+`BundleCommand.ExecuteAsync` is the user-facing wrapper. It takes a working directory and a project type, then hands off to `IBundlingService`:
+
+```csharp
+public async Task ExecuteAsync(CommandLineArgs commandLineArgs)
+{
+    var workingDirectoryArg = commandLineArgs.Options.GetOrNull(
+        Options.WorkingDirectory.Short, Options.WorkingDirectory.Long);
+
+    var workingDirectory = workingDirectoryArg ?? Directory.GetCurrentDirectory();
+
+    var forceBuild = commandLineArgs.Options.ContainsKey(Options.ForceBuild.Short) ||
+                     commandLineArgs.Options.ContainsKey(Options.ForceBuild.Long);
+
+    var projectType = GetProjectType(commandLineArgs);
+
+    if (!Directory.Exists(workingDirectory))
+    {
+        throw new CliUsageException(
+            "Specified directory does not exist." +
+            Environment.NewLine + Environment.NewLine + GetUsageInfo());
+    }
+
+    await BundlingService.BundleAsync(workingDirectory, forceBuild, projectType);
+}
+
+private string GetProjectType(CommandLineArgs commandLineArgs)
+{
+    var projectType = commandLineArgs.Options.GetOrNull(Options.ProjectType.Short, Options.ProjectType.Long);
+    projectType ??= BundlingConsts.WebAssembly;
+
+    return projectType.ToLower() switch {
+        "webassembly" => BundlingConsts.WebAssembly,
+        "maui-blazor" => BundlingConsts.MauiBlazor,
+        _ => throw new CliUsageException(ExceptionMessageHelper.GetInvalidOptionExceptionMessage("Project Type"))
+    };
+}
+```
+
+The constants come from `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Bundling/BundlingConsts.cs`:
+
+```csharp
+internal static class BundlingConsts
+{
+    internal const string StylePlaceholderStart  = "<!--ABP:Styles-->";
+    internal const string StylePlaceholderEnd    = "<!--/ABP:Styles-->";
+    internal const string ScriptPlaceholderStart = "<!--ABP:Scripts-->";
+    internal const string ScriptPlaceholderEnd   = "<!--/ABP:Scripts-->";
+    internal const string SupportedWebAssemblyProjectType = "Microsoft.NET.Sdk.BlazorWebAssembly";
+    internal const string SupportedMauiBlazorProjectType  = "Microsoft.NET.Sdk.Razor";
+    internal const string WebAssembly = "webassembly";
+    internal const string MauiBlazor  = "maui-blazor";
+}
+```
+
+These four placeholders are how `BundleCommand` knows where to insert the generated `<link>` and `<script>` tags inside `wwwroot/index.html` or `App.razor`.
+
+## `IBundlingService.BundleAsync`
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Bundling/IBundlingService.cs` is a one-method interface; the default implementation is in `BundlingService.cs`:
+
+```csharp
+public interface IBundlingService
+{
+    Task BundleAsync(string directory, bool forceBuild, string projectType = BundlingConsts.WebAssembly);
+}
+```
+
+`BundlingService.BundleAsync` is the longest method in the namespace. The high-level flow is:
+
+1. Refuse on macOS for MAUI Blazor (which is not supported).
+2. Find the `.csproj` in the working directory.
+3. Check the project SDK matches `Microsoft.NET.Sdk.BlazorWebAssembly` or `Microsoft.NET.Sdk.Razor`.
+4. Read `appsettings.json`/`wwwroot/appsettings.json` via `IConfigReader` to find the `Bundle` section.
+5. (Optionally) `dotnet build` the project so static web assets exist on disk.
+6. Locate the compiled assembly and read its `[DependsOn]` graph to find the startup module.
+7. Walk the module graph collecting `IBundleContributor` types via `FindBundleContributorsRecursively`.
+8. Order the contributors by dependency level and produce two `BundleContext` instances — one for scripts, one for styles.
+9. Switch on `bundleConfig.Mode` (`None`, `Bundle`, or `BundleAndMinify`) to either physically bundle the assets (via `IScriptBundler`/`IStyleBundler`) or just emit reference tags.
+10. Patch the template `index.html` or `App.razor` between the `<!--ABP:Styles-->`/`<!--ABP:Scripts-->` placeholders.
+
+The orchestration core is:
+
+```csharp
+var startupModule = GetStartupModule(assemblyFilePath);
+
+var bundleDefinitions = new List<BundleTypeDefinition>();
+FindBundleContributorsRecursively(startupModule, 0, bundleDefinitions);
+bundleDefinitions = bundleDefinitions.OrderByDescending(t => t.Level).ToList();
+
+var styleContext  = GetStyleContext(bundleDefinitions, bundleConfig);
+var scriptContext = GetScriptContext(bundleDefinitions, bundleConfig, projectType);
+
+if (bundleConfig.Mode is BundlingMode.Bundle or BundlingMode.BundleAndMinify)
+{
+    var options = new BundleOptions
+    {
+        Directory = directory,
+        FrameworkVersion = frameworkVersion,
+        ProjectFileName = projectName,
+        BundleName = bundleConfig.Name.IsNullOrEmpty() ? "global" : bundleConfig.Name,
+        Minify = bundleConfig.Mode == BundlingMode.BundleAndMinify,
+        ProjectType = projectType
+    };
+
+    styleDefinitions  = StyleBundler.Bundle(options, styleContext);
+    scriptDefinitions = ScriptBundler.Bundle(options, scriptContext);
+}
+else
+{
+    styleDefinitions  = GenerateStyleDefinitions(styleContext);
+    scriptDefinitions = GenerateScriptDefinitions(scriptContext);
+}
+```
+
+`BundlingMode` is a three-value enum from `Bundling/BundlingMode.cs`:
+
+```csharp
+public enum BundlingMode
+{
+    None,
+    Bundle,
+    BundleAndMinify,
+}
+```
+
+`None` means "just emit reference tags"; `Bundle` concatenates everything into one `global.css`/`global.js`; `BundleAndMinify` does the same plus minification through the injected `IMinifier`. The minifier comes from `Volo.Abp.Minify` — the `AbpMinifyModule` is a `[DependsOn]` of `AbpCliCoreModule`.
+
+## `IBundler`, `BundlerBase`, and the script/style flavours
+
+The actual concatenation is split into two concrete bundlers, both inheriting `BundlerBase`. `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Bundling/IBundler.cs`:
+
+```csharp
+public interface IBundler
+{
+    string Bundle(BundleOptions options, BundleContext context);
+}
+```
+
+`BundlerBase` does the heavy lifting — reading the project's `staticwebassets.runtime.json` to map logical `_content/Module/file.css` paths to physical disk locations, deduplicating, minifying, and writing the concatenated bundle:
+
+```csharp
+public abstract class BundlerBase : IBundler, ITransientDependency
+{
+    private static string[] _minFileSuffixes = {"min", "prod"};
+
+    protected IMinifier Minifier { get; }
+    public abstract string FileExtension { get; }
+    public abstract string GenerateDefinition(string bundleFilePath,
+        List<BundleDefinition> bundleDefinitionsExcludingFromBundle);
+
+    public string Bundle(BundleOptions options, BundleContext context)
+    {
+        var bundleFilePath = Path.Combine(PathHelper.GetWwwRootPath(options.Directory),
+            $"{options.BundleName}{FileExtension}");
+        var bundleFileDefinitions = context.BundleDefinitions
+            .Where(t => t.ExcludeFromBundle == false).ToList();
+        var fileDefinitionsExcludingFromBundle = context.BundleDefinitions
+            .Where(t => t.ExcludeFromBundle).ToList();
+
+        var bundledContent = options.ProjectType == BundlingConsts.WebAssembly
+            ? BundleWebAssemblyFiles(options, bundleFileDefinitions)
+            : BundleMauiBlazorFiles(options, bundleFileDefinitions);
+
+        File.WriteAllText(bundleFilePath, bundledContent);
+        return GenerateDefinition(bundleFilePath, fileDefinitionsExcludingFromBundle);
+    }
+}
+```
+
+`ScriptBundler` (under `Bundling/Scripts/`) and `StyleBundler` (under `Bundling/Styles/`) supply the file extension and the HTML snippet that the patcher splices into the document:
+
+```csharp
+public class ScriptBundler : BundlerBase, IScriptBundler, ITransientDependency
+{
+    public override string FileExtension => ".js";
+
+    public override string GenerateDefinition(string bundleFilePath,
+        List<BundleDefinition> bundleDefinitionsExcludingFromBundle)
+    {
+        var lastModifiedTicks = File.GetLastWriteTime(bundleFilePath).Ticks;
+        var builder = new StringBuilder();
+        builder.AppendLine($"{BundlingConsts.ScriptPlaceholderStart}");
+        builder.AppendLine(
+            $"    <script src=\"{Path.GetFileName(bundleFilePath)}?_v={lastModifiedTicks}\"></script>");
+
+        foreach (var bundleDefinition in bundleDefinitionsExcludingFromBundle)
+        {
+            builder.Append($"    <script src=\"{bundleDefinition.Source}\"");
+            foreach (var additionalProperty in bundleDefinition.AdditionalProperties)
+            {
+                builder.Append($" {additionalProperty.Key}={additionalProperty.Value} ");
+            }
+            builder.AppendLine("></script>");
+        }
+        builder.Append($"    {BundlingConsts.ScriptPlaceholderEnd}");
+        return builder.ToString();
+    }
+}
+```
+
+The `_v={lastModifiedTicks}` cache-buster query string makes the browser re-fetch the bundle when the file changes — without it, hard-refresh would be the only safe deployment story.
+
+## Linking back to `Volo.Abp.AspNetCore.Mvc.UI.Bundling`
+
+`BundleContext`, `BundleDefinition`, `IBundleContributor`, and `BundleTypeDefinition` are *not* in the CLI assembly — they live in `Volo.Abp.Bundling`/`Volo.Abp.AspNetCore.Mvc.UI.Bundling`. The CLI is a consumer:
+
+```csharp
+using Volo.Abp.Bundling;
+using Volo.Abp.Cli.Bundling.Scripts;
+using Volo.Abp.Cli.Bundling.Styles;
+```
+
+`FindBundleContributorsRecursively` reflects on the user's assembly to find every `[BundleContributor]`/`IBundleContributor`-implementing class, calls `contributor.AddScripts(scriptContext)` and `contributor.AddStyles(styleContext)`, and lets each contributor add its own `BundleDefinition` entries to the shared context. The MVC UI bundling system documented at [/ui-mvc/bundling](/ui-mvc/bundling) is the runtime counterpart — at *runtime* the contributors emit `<link>`/`<script>` tags through tag helpers; at *build* time the CLI walks the same contributor graph and pre-generates the bundle.
+
+This dual-mode design means a module like `Volo.Abp.AspNetCore.Components.WebAssembly.LeptonXTheme` ships a single `IBundleContributor` class and gets both the runtime injection and the CLI-driven WASM bundle for free.
+
+## Where the bundle physically lands
+
+`PathHelper` under `Bundling/PathHelper.cs` centralises every disk-layout assumption:
+
+```csharp
+static internal string GetWebAssemblyFrameworkFolderPath(string projectDirectory, string frameworkVersion)
+{
+    return Path.Combine(projectDirectory, "bin", "Debug", frameworkVersion, "wwwroot", "_framework");
+}
+
+static internal string GetWebAssemblyFilePath(string directory, string frameworkVersion, string projectFileName)
+{
+    var outputDirectory = Path.Combine(directory, "bin", "Debug", frameworkVersion);
+    var path = Path.Combine(outputDirectory, projectFileName + ".dll");
+    return !File.Exists(path) ? null : path;
+}
+
+static internal string GetMauiBlazorAssemblyFilePath(string directory, string projectFileName)
+{
+    return Directory.GetFiles(Path.Combine(directory, "bin"), "*.dll", SearchOption.AllDirectories)
+        .FirstOrDefault(f =>
+            !f.Contains("android") &&
+            !f.Contains("windows10") &&
+            f.EndsWith(projectFileName + ".dll", StringComparison.OrdinalIgnoreCase));
+}
+
+static internal string GetWwwRootPath(string directory)
+{
+    return Path.Combine(directory, "wwwroot");
+}
+```
+
+The bundle file is always written next to `wwwroot/index.html` so relative URLs in the generated `<link>`/`<script>` tags resolve cleanly when the app is served.
+
+## Patching `index.html` and `App.razor`
+
+After both bundlers have produced their definition strings, `BundlingService.BundleAsync` either patches `wwwroot/index.html` (standalone WASM) or `App.razor` (Blazor Web App / module host) between the two placeholder pairs:
+
+```csharp
+if (!bundleConfig.InteractiveAuto)
+{
+    var fileName = bundleConfig.IsBlazorWebApp
+        ? Directory.GetFiles(
+            Path.GetDirectoryName(projectFilePath)!.Replace(".Client", ""),
+            "App.razor", SearchOption.AllDirectories).FirstOrDefault() ??
+          Directory.GetFiles(
+            Path.GetDirectoryName(projectFilePath)!.Replace(".Blazor", ".Host"),
+            "App.razor", SearchOption.AllDirectories).FirstOrDefault()
+        : Path.Combine(PathHelper.GetWwwRootPath(directory), "index.html");
+
+    if (fileName == null)
+    {
+        throw new BundlingException($"App.razor file could not be found in the {projectFilePath} directory.");
+    }
+
+    await UpdateDependenciesInBlazorFileAsync(fileName, styleDefinitions, scriptDefinitions);
+
+    Logger.LogInformation($"Script and style references in the {fileName} file have been updated.");
+}
+```
+
+`UpdateDependenciesInBlazorFileAsync` does a placeholder-bounded text replacement — it locates `<!--ABP:Styles-->`/`<!--/ABP:Styles-->` and `<!--ABP:Scripts-->`/`<!--/ABP:Scripts-->` and replaces everything between them. This means manual edits *outside* the placeholders survive bundling runs.
+
+## The `BundleConfig` source of truth
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Bundling/BundleConfig.cs` mirrors a `Bundle` section in the project's `appsettings.json`:
+
+```json
+{
+  "Bundle": {
+    "Mode": "BundleAndMinify",
+    "Name": "global",
+    "Parameters": { },
+    "InteractiveAuto": false,
+    "IsBlazorWebApp": false
+  }
+}
+```
+
+`IConfigReader` (under `Volo.Abp.Cli.Configuration`) is responsible for finding this file — for WASM templates it reads `wwwroot/appsettings.json`, for Blazor Web Apps it reads the server-side `appsettings.json`. The `Parameters` dictionary is forwarded to `BundleContext.Parameters` and lets a contributor switch behaviour per environment (a common pattern is `"culture": "tr"` to pick a localised LeptonX theme).
+
+## How `abp new` invokes `abp bundle`
+
+The link from `NewCommand` back to `BundleCommand` is via `IBundlingService` injection rather than a re-dispatch through the selector. `ProjectCreationCommandBase` takes `IBundlingService` in its constructor and `RunBundleInternalAsync` calls `BundleAsync(directory, forceBuild: true, projectType)` directly. The result is that `abp new` produces a runnable Blazor app on the very first `dotnet run` — without an extra `abp bundle` invocation.
+
+The `--skip-bundling` flag on `abp new` flips this off (useful in CI where the build server will run `abp bundle` after restoring dependencies separately).
+
+## Putting it all together
+
+A single `abp new Acme.BookStore -u blazor -d mongodb --connection-string "..."` runs:
+
+1. `CliService.RunAsync` → `CommandSelector.Select` returns `typeof(NewCommand)`.
+2. `NewCommand.ExecuteAsync` validates `Acme.BookStore`, resolves the `app` template via `TemplateInfoProvider`, builds a `ProjectBuildArgs` with `UiFramework=Blazor`, `DatabaseProvider=MongoDb`, and `ConnectionString="..."`.
+3. `TemplateProjectBuilder.BuildAsync` calls `AbpIoSourceCodeStore.GetAsync("app", ...)` which downloads or reads from `~/.abp/templates`.
+4. `TemplateProjectBuildPipelineBuilder.Build` assembles a `ProjectBuildPipeline` ending in `CreateProjectResultZipStep`.
+5. `pipeline.Execute()` mutates the in-memory file list; `LicenseCodeReplaceStep` (if pro), `ConnectionStringChangeStep`, the chosen `DatabaseManagementSystemChangeStep`, and every template-supplied custom step all run.
+6. The resulting bytes are returned as `ProjectBuildResult`.
+7. `NewCommand.ExtractProjectZip` unpacks into `args.OutputFolder`.
+8. `RunInstallLibsForWebTemplateAsync` restores client-side libs ([/cli/install-libs](/cli/install-libs)).
+9. `RunBundleInternalAsync` calls `IBundlingService.BundleAsync` against the freshly created `*.Blazor.Client.csproj`.
+10. `BundlingService.BundleAsync` builds the project, walks the contributor graph, writes `wwwroot/global.css` and `wwwroot/global.js`, and patches `wwwroot/index.html` between the ABP placeholders.
+11. The user opens the documentation page if `--no-open-web-page` was not set, then `NewCommand.ExecuteAsync` returns.
+
+## Cross-references
+
+- The pipeline that produces the zip: [/cli/project-building](/cli/project-building).
+- The runtime bundling that `IBundleContributor` plugs into at *request* time: [/ui-mvc/bundling](/ui-mvc/bundling).
+- The Angular schematics that play the same role for Angular templates: [/angular/schematics-and-generators](/angular/schematics-and-generators).
+- The library restoration that `--skip-installing-libs` controls: [/cli/install-libs](/cli/install-libs).
+- The startup-template metadata each generator branches on: [/templates/overview](/templates/overview).
+- The CLI-level abstractions shared across commands: [/cli/cli-core-abstractions](/cli/cli-core-abstractions).
+- The dispatch entry: [/cli/overview](/cli/overview).

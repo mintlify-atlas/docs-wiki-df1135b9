@@ -1,0 +1,355 @@
+---
+title: "Permission System: Definitions, Checker, Value Providers"
+sidebarTitle: "Permissions"
+description: "Inside Volo.Abp.Authorization permissions — definition providers, PermissionChecker, User/Role/Client value providers, and the IPermissionStore contract."
+---
+
+The ABP Framework permission system sits one layer above ASP.NET Core authorization. Rather than registering ad-hoc policies, you declare named permissions in `IPermissionDefinitionProvider` classes and check them through `IPermissionChecker`. This page is the deep-dive on `PermissionDefinition`, the `User/Role/Client` value-provider chain, and how `PermissionChecker` integrates with `ISimpleStateCheckerManager` and multi-tenancy. It complements the [Authorization](/security/authorization) page which covers how `[Authorize]` and policies are evaluated.
+
+## Defining permissions: `IPermissionDefinitionProvider`
+
+`framework/src/Volo.Abp.Authorization.Abstractions/Volo/Abp/Authorization/Permissions/IPermissionDefinitionProvider.cs` is the entry point a module implements to register permissions:
+
+```csharp
+public interface IPermissionDefinitionProvider
+{
+    void PreDefine(IPermissionDefinitionContext context);
+    void Define(IPermissionDefinitionContext context);
+    void PostDefine(IPermissionDefinitionContext context);
+}
+```
+
+Three callbacks exist so modules can run in three explicit phases:
+
+| Phase | When to use it |
+| --- | --- |
+| `PreDefine` | Create groups that other modules may add permissions to |
+| `Define` | Most modules just override this — register your own permissions |
+| `PostDefine` | Final pass — disable, rename, or remove permissions defined by other modules |
+
+`PermissionDefinitionProvider` (same folder) is an abstract no-op base so providers can override only the phase they need.
+
+`AbpAuthorizationModule.AutoAddDefinitionProviders` (in `AbpAuthorizationModule.cs`) auto-registers every concrete `IPermissionDefinitionProvider` into `AbpPermissionOptions.DefinitionProviders` — you only need to mark a class `: PermissionDefinitionProvider` and put it in the assembly, no `[DependsOn]` or manual `Configure<>` is required.
+
+## `IPermissionDefinitionContext`
+
+The context that providers write into lives at `framework/src/Volo.Abp.Authorization.Abstractions/Volo/Abp/Authorization/Permissions/IPermissionDefinitionContext.cs`:
+
+```csharp
+public interface IPermissionDefinitionContext
+{
+    IServiceProvider ServiceProvider { get; }
+    PermissionGroupDefinition GetGroup(string name);
+    PermissionGroupDefinition? GetGroupOrNull(string name);
+    PermissionGroupDefinition AddGroup(string name, ILocalizableString? displayName = null);
+    void RemoveGroup(string name);
+    PermissionDefinition? GetPermissionOrNull(string name);
+
+    PermissionDefinition AddResourcePermission(
+        string name, string resourceName, string managementPermissionName,
+        ILocalizableString? displayName = null,
+        MultiTenancySides multiTenancySide = MultiTenancySides.Both,
+        bool isEnabled = true);
+
+    PermissionDefinition? GetResourcePermissionOrNull(string resourceName, string name);
+    void RemoveResourcePermission(string resourceName, string name);
+}
+```
+
+The concrete `PermissionDefinitionContext` (`framework/src/Volo.Abp.Authorization.Abstractions/Volo/Abp/Authorization/Permissions/PermissionDefinitionContext.cs`) stores groups in `Dictionary<string, PermissionGroupDefinition>` and resource permissions in `List<PermissionDefinition>`. It tracks `CurrentProvider` internally so each new group or permission gets a `_CurrentProviderName` property — useful when you need to know which module added a permission later.
+
+A typical provider looks like:
+
+```csharp
+public class BookStorePermissionDefinitionProvider : PermissionDefinitionProvider
+{
+    public override void Define(IPermissionDefinitionContext context)
+    {
+        var group = context.AddGroup("BookStore", L("Permission:BookStore"));
+        var books = group.AddPermission("BookStore.Books", L("Permission:Books"));
+        books.AddChild("BookStore.Books.Create", L("Permission:Books.Create"));
+        books.AddChild("BookStore.Books.Edit",   L("Permission:Books.Edit"));
+        books.AddChild("BookStore.Books.Delete", L("Permission:Books.Delete"));
+    }
+}
+```
+
+`AddChild` enforces the hierarchical rule encoded in `PermissionDefinition.AddChild` — a child permission cannot be granted unless the parent is granted. The `Parent` chain also drives the admin UI grouping in the permission-management module.
+
+## `PermissionDefinition`
+
+`framework/src/Volo.Abp.Authorization.Abstractions/Volo/Abp/Authorization/Permissions/PermissionDefinition.cs` is the metadata record:
+
+```csharp
+public class PermissionDefinition :
+    IHasSimpleStateCheckers<PermissionDefinition>,
+    ICanAddChildPermission
+{
+    public string Name { get; }
+    public string? ResourceName { get; set; }
+    public string? ManagementPermissionName { get; set; }
+    public PermissionDefinition? Parent { get; private set; }
+    public MultiTenancySides MultiTenancySide { get; set; }
+    public List<string> Providers { get; }
+    public List<ISimpleStateChecker<PermissionDefinition>> StateCheckers { get; }
+    public ILocalizableString DisplayName { get; set; }
+    public IReadOnlyList<PermissionDefinition> Children { get; }
+    public Dictionary<string, object?> Properties { get; }
+    public bool IsEnabled { get; set; }
+    public object? this[string name] { get; set; }
+}
+```
+
+Key fields:
+
+| Field | Effect at check time |
+| --- | --- |
+| `Name` | The string passed to `[Authorize(name)]` and `IPermissionChecker.IsGrantedAsync(name)` |
+| `IsEnabled` | When `false`, `PermissionChecker` short-circuits to `false` (still queryable) |
+| `MultiTenancySide` | Bitmask of `Host`, `Tenant`, or `Both`; the checker filters by current side |
+| `Providers` | Whitelist of value-provider names (`"U"`, `"R"`, `"C"`); empty = all allowed |
+| `StateCheckers` | Extra `ISimpleStateChecker` filters (see [Simple State Checking](/security/simple-state-checking)) |
+| `Parent` | Auto-prohibition if parent is not granted |
+| `ResourceName` / `ManagementPermissionName` | Marks this as a resource permission (object-level) |
+
+The `WithProperty` / `WithProviders` fluent extensions let definitions carry arbitrary metadata. For example, `BookStore.Books.Create.WithProperty("RequiresEdition", true)` could be picked up by a custom `ISimpleStateChecker` to gate it on edition.
+
+## `IPermissionDefinitionManager`
+
+The manager (`IPermissionDefinitionManager.cs`) is the runtime accessor for everything providers registered:
+
+```csharp
+public interface IPermissionDefinitionManager
+{
+    Task<PermissionDefinition> GetAsync(string name);
+    Task<PermissionDefinition?> GetOrNullAsync(string name);
+    Task<PermissionDefinition> GetResourcePermissionAsync(string resourceName, string name);
+    Task<PermissionDefinition?> GetResourcePermissionOrNullAsync(string resourceName, string name);
+    Task<IReadOnlyList<PermissionDefinition>> GetPermissionsAsync();
+    Task<IReadOnlyList<PermissionDefinition>> GetResourcePermissionsAsync();
+    Task<IReadOnlyList<PermissionGroupDefinition>> GetGroupsAsync();
+}
+```
+
+The default implementation `PermissionDefinitionManager` (in the non-abstractions package, `framework/src/Volo.Abp.Authorization/Volo/Abp/Authorization/Permissions/PermissionDefinitionManager.cs`) merges two stores: `IStaticPermissionDefinitionStore` (compile-time definitions from providers) and `IDynamicPermissionDefinitionStore` (database-loaded definitions, supplied by the [permission-management module](/modules/permission-management)).
+
+The dynamic store lets you ship permissions in a database table so admins can add new permissions to a running system without redeploying. The fallback `NullDynamicPermissionDefinitionStore` returns empty lists when no dynamic store is registered — apps that don't need this can ignore it entirely.
+
+## `IPermissionChecker`
+
+`framework/src/Volo.Abp.Authorization.Abstractions/Volo/Abp/Authorization/Permissions/IPermissionChecker.cs`:
+
+```csharp
+public interface IPermissionChecker
+{
+    Task<bool> IsGrantedAsync(string name);
+    Task<bool> IsGrantedAsync(ClaimsPrincipal? claimsPrincipal, string name);
+    Task<MultiplePermissionGrantResult> IsGrantedAsync(string[] names);
+    Task<MultiplePermissionGrantResult> IsGrantedAsync(ClaimsPrincipal? claimsPrincipal, string[] names);
+}
+```
+
+The parameterless overloads pick up the principal from `ICurrentPrincipalAccessor`; the overloads that take a `ClaimsPrincipal?` let you check permissions for any user (used by background jobs and admin UIs that impersonate users).
+
+The default `PermissionChecker` (`framework/src/Volo.Abp.Authorization/Volo/Abp/Authorization/Permissions/PermissionChecker.cs`) runs a strict pipeline:
+
+```csharp
+public virtual async Task<bool> IsGrantedAsync(ClaimsPrincipal? claimsPrincipal, string name)
+{
+    var permission = await PermissionDefinitionManager.GetOrNullAsync(name);
+    if (permission == null) return false;
+    if (!permission.IsEnabled) return false;
+    if (!await StateCheckerManager.IsEnabledAsync(permission)) return false;
+
+    var multiTenancySide = claimsPrincipal?.GetMultiTenancySide()
+                           ?? CurrentTenant.GetMultiTenancySide();
+    if (!permission.MultiTenancySide.HasFlag(multiTenancySide)) return false;
+
+    var isGranted = false;
+    var context = new PermissionValueCheckContext(permission, claimsPrincipal);
+    foreach (var provider in PermissionValueProviderManager.ValueProviders)
+    {
+        if (context.Permission.Providers.Any() &&
+            !context.Permission.Providers.Contains(provider.Name)) continue;
+
+        var result = await provider.CheckAsync(context);
+        if (result == PermissionGrantResult.Granted)  isGranted = true;
+        else if (result == PermissionGrantResult.Prohibited) return false;
+    }
+    return isGranted;
+}
+```
+
+The five gates, in order:
+
+1. **Existence** — unknown names return `false`. There is no implicit "anything goes".
+2. **`IsEnabled`** — a disabled `PermissionDefinition` is queryable but never granted.
+3. **State checkers** — `ISimpleStateCheckerManager<PermissionDefinition>` is consulted so global filters (edition checks, global-feature checks, etc.) can veto.
+4. **Multi-tenancy side** — `permission.MultiTenancySide.HasFlag(currentSide)` must hold.
+5. **Provider chain** — each `IPermissionValueProvider` is asked; one `Prohibited` is a hard veto, any `Granted` wins if no later provider prohibits.
+
+```mermaid
+flowchart LR
+    A[IsGrantedAsync(name)] --> B{Defined?}
+    B -- no --> X[false]
+    B -- yes --> C{IsEnabled?}
+    C -- no --> X
+    C -- yes --> D{State checkers pass?}
+    D -- no --> X
+    D -- yes --> E{Multi-tenancy<br/>side matches?}
+    E -- no --> X
+    E -- yes --> F[Provider chain<br/>U → R → C]
+    F --> G{Any Prohibited?}
+    G -- yes --> X
+    G -- no --> H{Any Granted?}
+    H -- yes --> Y[true]
+    H -- no --> X
+```
+
+## `MultiplePermissionGrantResult` and batch checks
+
+The bulk overload `IsGrantedAsync(string[] names)` returns a `MultiplePermissionGrantResult` (`MultiplePermissionGrantResult.cs`):
+
+```csharp
+public class MultiplePermissionGrantResult
+{
+    public bool AllGranted  { get; }   // all entries == Granted
+    public bool AllProhibited { get; } // all entries == Prohibited
+    public Dictionary<string, PermissionGrantResult> Result { get; }
+}
+```
+
+Inside `PermissionChecker`, the batch path adds each name with an initial `Undefined`, prunes definitions that fail the global gates (enabled, state, tenancy), then iterates providers. As soon as `result.AllProhibited` becomes `true` the loop breaks early — useful to keep round-trips small when an admin UI asks "does this user have any of these 100 permissions?".
+
+## `IPermissionValueProvider` chain
+
+`framework/src/Volo.Abp.Authorization.Abstractions/Volo/Abp/Authorization/Permissions/IPermissionValueProvider.cs`:
+
+```csharp
+public interface IPermissionValueProvider
+{
+    string Name { get; }
+    Task<PermissionGrantResult> CheckAsync(PermissionValueCheckContext context);
+    Task<MultiplePermissionGrantResult> CheckAsync(PermissionValuesCheckContext context);
+}
+```
+
+The three built-in providers (registered in `AbpAuthorizationModule.ConfigureServices`) all delegate to `IPermissionStore`:
+
+### `UserPermissionValueProvider` (`"U"`)
+
+```csharp
+public override async Task<PermissionGrantResult> CheckAsync(PermissionValueCheckContext context)
+{
+    var userId = context.Principal?.FindFirst(AbpClaimTypes.UserId)?.Value;
+    if (userId == null) return PermissionGrantResult.Undefined;
+
+    return await PermissionStore.IsGrantedAsync(context.Permission.Name, Name, userId)
+        ? PermissionGrantResult.Granted
+        : PermissionGrantResult.Undefined;
+}
+```
+
+Reads the `userId` claim and asks the store "is permission `X` granted to provider `U` with key `userId`?". Returns `Undefined` (not `Prohibited`) when no user is logged in, so a later provider in the chain can still grant the permission.
+
+### `RolePermissionValueProvider` (`"R"`)
+
+Iterates every `role` claim, returning `Granted` on the first match:
+
+```csharp
+foreach (var role in roles.Distinct())
+{
+    if (await PermissionStore.IsGrantedAsync(context.Permission.Name, Name, role))
+        return PermissionGrantResult.Granted;
+}
+return PermissionGrantResult.Undefined;
+```
+
+The batch overload walks roles one at a time, merging results until every name is decided or `AllGranted`/`AllProhibited` is reached.
+
+### `ClientPermissionValueProvider` (`"C"`)
+
+For machine-to-machine OAuth clients. It reads `AbpClaimTypes.ClientId` and — importantly — temporarily clears `ICurrentTenant` while querying the store:
+
+```csharp
+using (CurrentTenant.Change(null))
+{
+    return await PermissionStore.IsGrantedAsync(context.Permission.Name, Name, clientId)
+        ? PermissionGrantResult.Granted
+        : PermissionGrantResult.Undefined;
+}
+```
+
+Client grants are stored host-side because a client identity isn't tied to a tenant.
+
+| Provider | `Name` | Key claim | Store lookup |
+| --- | --- | --- | --- |
+| `UserPermissionValueProvider` | `"U"` | `AbpClaimTypes.UserId` | `(name, "U", userId)` |
+| `RolePermissionValueProvider` | `"R"` | `AbpClaimTypes.Role` (multi) | `(name, "R", role)` for each role |
+| `ClientPermissionValueProvider` | `"C"` | `AbpClaimTypes.ClientId` | `(name, "C", clientId)` host-side |
+
+You can add custom providers (for organization unit, edition, attribute-based access) by writing an `IPermissionValueProvider` and adding it to `AbpPermissionOptions.ValueProviders` in your module's `ConfigureServices`.
+
+## `IPermissionStore`
+
+`framework/src/Volo.Abp.Authorization.Abstractions/Volo/Abp/Authorization/Permissions/IPermissionStore.cs`:
+
+```csharp
+public interface IPermissionStore
+{
+    Task<bool> IsGrantedAsync(string name, string? providerName, string? providerKey);
+    Task<MultiplePermissionGrantResult> IsGrantedAsync(string[] names, string? providerName, string? providerKey);
+}
+```
+
+The default `NullPermissionStore` returns `false` for everything — so out of the box, with only the framework packages, no permission is ever granted. The [permission-management module](/modules/permission-management) ships the EF Core / MongoDB implementation that reads from a `PermissionGrants` table keyed on `(Name, ProviderName, ProviderKey, TenantId)`. The same shape is used by all three built-in providers.
+
+## Resource permissions
+
+When a permission is created via `AddResourcePermission(name, resourceName, managementPermissionName)` it represents an object-level check ("can user X edit *this specific* document?"). Resource permissions:
+
+- Are stored separately in `PermissionDefinitionContext.ResourcePermissions` and exposed by `IPermissionDefinitionManager.GetResourcePermissionsAsync`.
+- Cannot have children (`PermissionDefinition.AddChild` throws when `ResourceName != null`).
+- Are evaluated by `ResourcePermissionRequirement` and `KeyedObjectResourcePermissionRequirementHandler` in `framework/src/Volo.Abp.Authorization/Volo/Abp/Authorization/Permissions/Resources/`.
+- Use a parallel value-provider chain (`UserResourcePermissionValueProvider`, `RoleResourcePermissionValueProvider`, `ClientResourcePermissionValueProvider`) configured in `AbpPermissionOptions.ResourceValueProviders`.
+
+The `ManagementPermissionName` argument names the *non-resource* permission that grants management rights (e.g. "edit any document"). The resource handler will short-circuit to `Granted` when that management permission is held.
+
+## `PermissionGrantResult`
+
+`framework/src/Volo.Abp.Authorization.Abstractions/Volo/Abp/Authorization/Permissions/PermissionGrantResult.cs` is intentionally three-valued:
+
+```csharp
+public enum PermissionGrantResult
+{
+    Undefined,
+    Granted,
+    Prohibited
+}
+```
+
+This three-state model is what makes the provider chain composable. `Undefined` means "I don't know, ask the next provider"; `Granted` means "yes (subject to no later `Prohibited`)"; `Prohibited` is final. The role provider returning `Undefined` (rather than `false`) is what lets the client provider still answer "yes" for a service account that happens to call the same endpoint.
+
+## State checkers and global features
+
+Because `PermissionDefinition` implements `IHasSimpleStateCheckers<PermissionDefinition>`, you can attach `ISimpleStateChecker<PermissionDefinition>` to disable permissions based on dynamic conditions. The framework ships these helpers in `framework/src/Volo.Abp.Authorization/Volo/Abp/Authorization/Permissions/`:
+
+- `PermissionSimpleStateCheckerExtensions.RequirePermissions(...)` — only enable this permission if other permissions are granted.
+- `RequireAuthenticatedSimpleStateChecker` — only enable if the principal is authenticated.
+- `GlobalFeatureSimpleStateCheckerExtensions.RequireGlobalFeatures(...)` from the GlobalFeatures package — gate on compile-time/startup features.
+
+See [Simple State Checking](/security/simple-state-checking) for the underlying machinery and [Global Features](/security/global-features) for the GlobalFeature integration.
+
+## Telemetry
+
+`TelemetryPermissionInfoEnricher` (in the same folder) hooks the `System.Diagnostics.Activity` of the current request and writes the checked permission name as a tag — useful for tracing why a request failed in distributed systems.
+
+## Related pages and modules
+
+- [Authorization](/security/authorization) — how `[Authorize]` flows into `IPermissionChecker`.
+- [Security Abstractions](/security/security-abstractions) — `AbpClaimTypes`, `ICurrentPrincipalAccessor`.
+- [Simple State Checking](/security/simple-state-checking) — the `ISimpleStateChecker` model.
+- [Permission Management module](/modules/permission-management) — concrete `IPermissionStore`, dynamic definition store, admin UI.
+- [Identity module](/modules/identity) — users, roles, claims that feed the providers.
+- [Multi-tenancy overview](/multi-tenancy/overview) — `MultiTenancySide` semantics.
+- [JWT Bearer integration](/aspnetcore/jwt-bearer-auth) — how the `userId` / `role` / `clientId` claims land in the principal.

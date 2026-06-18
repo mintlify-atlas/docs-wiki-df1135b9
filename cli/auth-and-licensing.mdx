@@ -1,0 +1,689 @@
+---
+title: "Authentication and Commercial Licensing in the CLI"
+sidebarTitle: "Auth & Licensing"
+description: "Inside abp login, logout, and login-info — the OAuth grant, the access-token file at ~/.abp/cli, and the API-key flow for pro templates."
+---
+
+The ABP Framework CLI is a thin client to the `account.abp.io` identity server. Logging in stores an access token on disk; subsequent commands that need entitlement (commercial templates, the Suite installer, source-code downloads) read the token and exchange it for an API key. This page covers the four moving parts: the `LoginCommand`/`LogoutCommand`/`LoginInfoCommand` trio, the `AuthService` that holds the cookie and the OAuth wiring, the `AbpIoApiKeyService` that bridges authentication and licensing, and the `LicenseCodeReplaceStep` that splices the license into freshly scaffolded pro solutions. Files referenced live under `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Auth/`, `Licensing/`, `Commands/`, and `ProjectBuilding/Building/Steps/`.
+
+## Where the credentials live
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/CliPaths.cs` is the single source of truth for every on-disk artifact the CLI maintains:
+
+```csharp
+public static class CliPaths
+{
+    public static string TemplateCache => Path.Combine(AbpRootPath, "templates");
+    public static string Log => Path.Combine(AbpRootPath, "cli", "logs");
+    public static string Root => Path.Combine(AbpRootPath, "cli");
+    public static string AccessToken => Path.Combine(AbpRootPath, "cli", "access-token.bin");
+    public static string ComputerId  => Path.Combine(AbpRootPath, "cli", "computer-id.bin");
+    public static string Memory      => Path.Combine(
+        Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location)!, "memory.bin");
+    public static string Build       => Path.Combine(AbpRootPath, "build");
+    public static string Lic         => Path.Combine(Path.GetTempPath(),
+        Encoding.ASCII.GetString(new byte[] { 65, 98, 112, 76, 105, 99, 101, 110, 115, 101, 46, 98, 105, 110 }));
+    public static string McpToolsCache => Path.Combine(Root, "mcp-tools.json");
+    public static string McpLog        => Path.Combine(Log, "mcp.log");
+    public static string McpConfig     => Path.Combine(Root, "mcp-config.json");
+
+    public static readonly string AbpRootPath =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".abp");
+}
+```
+
+Three of these are auth/licensing-related:
+
+- `AccessToken` — `~/.abp/cli/access-token.bin` is the OAuth bearer token saved after a successful `abp login`.
+- `ComputerId` — a stable per-machine identifier the API key service includes when redeeming an API key.
+- `Lic` — a deobfuscated filename `AbpLicense.bin` placed in the system temp directory. The byte array decodes to the ASCII text `AbpLicense.bin`. Storing the name out-of-band makes casual file-system searches less likely to surface it; the file holds the cached license payload for offline scenarios.
+
+`AbpRootPath` is always `<userprofile>/.abp`, so the same paths apply on Linux, macOS, and Windows — the CLI does not vary the layout per OS.
+
+## The endpoints the CLI talks to
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/CliUrls.cs` resolves the remote endpoints. The production defaults are:
+
+```csharp
+public static string WwwAbpIoProduction       = "https://abp.io/";
+public static string AccountAbpIoProduction   = "https://account.abp.io/";
+public static string NuGetRootPathProduction  = "https://nuget.abp.io/";
+
+public static string WwwAbpIoDevelopment      = "https://localhost:44328/";
+public static string AccountAbpIoDevelopment  = "https://localhost:44333/";
+public static string NuGetRootPathDevelopment = "https://localhost:44373/";
+```
+
+The four endpoints actually consumed by the auth/licensing stack are:
+
+| URL | Caller | Purpose |
+| --- | --- | --- |
+| `${AccountAbpIo}` | `AuthService.LoginAsync` | OAuth Resource-Owner-Password (and Device-Code) token issuance. |
+| `${AccountAbpIo}api/license/login-info` | `AuthService.GetLoginInfoAsync` | Show profile info (`abp login-info`). |
+| `${AccountAbpIo}api/license/api-key` | `AbpIoApiKeyService.GetApiKeyOrNullAsync` | Redeem an API key + license code for the current developer. |
+| `${AccountAbpIo}api/license/check-user` | `TemplateInfoProvider.CheckProLicenseAsync` | Decide whether `abp new` defaults to a pro template. |
+| `${AccountAbpIo}api/license/check-multiple-organizations` | `AuthService.CheckMultipleOrganizationsAsync` | Force `--organization` selection when the user belongs to many. |
+| `CliConsts.LogoutUrl` (= `${AccountAbpIo}api/license/logout`) | `AuthService.LogoutAsync` | Revoke the cached access token server-side. |
+
+These URLs are public-static fields rather than `const` so test harnesses can swap them to a localhost server.
+
+## `LoginCommand` — the user-facing surface
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/LoginCommand.cs` is the verb the user types. The class layout is the standard `IConsoleCommand`:
+
+```csharp
+public class LoginCommand : IConsoleCommand, ITransientDependency
+{
+    public const string Name = "login";
+    protected AuthService AuthService { get; }
+    // ...
+}
+```
+
+`ExecuteAsync` branches on whether `--device` was passed, then handles the password path or the device-code path. The password path also handles the multi-organisation case:
+
+```csharp
+public async Task ExecuteAsync(CommandLineArgs commandLineArgs)
+{
+    if (!commandLineArgs.Options.ContainsKey("device"))
+    {
+        if (commandLineArgs.Target.IsNullOrEmpty())
+        {
+            throw new CliUsageException("Username name is missing!" +
+                Environment.NewLine + Environment.NewLine + GetUsageInfo());
+        }
+
+        var organization = commandLineArgs.Options.GetOrNull(
+            Options.Organization.Short, Options.Organization.Long);
+
+        if (await HasMultipleOrganizationAndThisNotSpecified(commandLineArgs, organization))
+        {
+            return;
+        }
+
+        var password = commandLineArgs.Options.GetOrNull(
+            Options.Password.Short, Options.Password.Long);
+        if (password == null)
+        {
+            Console.Write("Password: ");
+            password = ConsoleHelper.ReadSecret();
+            if (password.IsNullOrWhiteSpace())
+            {
+                throw new CliUsageException("Password is missing!" + ...);
+            }
+        }
+
+        try
+        {
+            await AuthService.LoginAsync(commandLineArgs.Target, password, organization);
+        }
+        catch (Exception ex)
+        {
+            LogCliError(ex, commandLineArgs);
+            return;
+        }
+
+        Logger.LogInformation($"Successfully logged in as '{commandLineArgs.Target}'");
+    }
+    else
+    {
+        try
+        {
+            await AuthService.DeviceLoginAsync();
+        }
+        catch (Exception ex)
+        {
+            LogCliError(ex, commandLineArgs);
+            return;
+        }
+
+        var loginInfo = await AuthService.GetLoginInfoAsync();
+        Logger.LogInformation($"Successfully logged in as '{loginInfo.Username}'");
+    }
+}
+```
+
+The help text shows the supported invocations:
+
+```text
+abp login <username>
+abp login <username> -p <password>
+abp login <username> --device
+
+Example:
+  abp login john
+  abp login john -p 1234
+```
+
+### Multi-organisation handling
+
+When a user belongs to several organisations, the password grant alone is not enough — the server needs the organisation name in the token request. `HasMultipleOrganizationAndThisNotSpecified` checks this proactively:
+
+```csharp
+private async Task<bool> HasMultipleOrganizationAndThisNotSpecified(
+    CommandLineArgs commandLineArgs, string organization)
+{
+    if (string.IsNullOrWhiteSpace(organization) &&
+        await AuthService.CheckMultipleOrganizationsAsync(commandLineArgs.Target))
+    {
+        Logger.LogError(
+            $"You have multiple organizations, please specify your organization with `--organization` parameter.");
+        return true;
+    }
+    return false;
+}
+```
+
+This avoids the user typing the password before being told they also needed `-o`.
+
+### Error message decoding
+
+The server can return errors as HTML pages (for example when 2FA is required). `LoginCommand.LogCliError` tries to extract a friendly message from the embedded `error-page-container` markup:
+
+```csharp
+private void LogCliError(Exception ex, CommandLineArgs args)
+{
+    if (ex.Message.Contains("Invalid username or password"))
+    {
+        Logger.LogError("Invalid username or password!");
+        return;
+    }
+
+    if (ex.Message.Contains("RequiresTwoFactor"))
+    {
+        Logger.LogError(
+            "Two factor authentication is enabled for your account. Please use `abp login --device` command to login.");
+        return;
+    }
+
+    if (TryGetErrorMessageFromHtmlPage(ex.Message, out var errorMsg))
+    {
+        Logger.LogError(errorMsg);
+        return;
+    }
+
+    Logger.LogError(ex.Message);
+}
+```
+
+The 2FA branch points the user at `abp login --device` because the device-code grant runs in a browser that can complete the 2FA flow.
+
+## `AuthService` — the cookie holder
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Auth/IAuthService.cs` is the contract; the implementation in `AuthService.cs` is the real work. The interface:
+
+```csharp
+public interface IAuthService
+{
+    Task<LoginInfo> GetLoginInfoAsync();
+    Task LoginAsync(string userName, string password, string organizationName = null);
+    Task LogoutAsync();
+    Task<bool> CheckMultipleOrganizationsAsync(string username);
+}
+```
+
+### The password grant
+
+`AuthService.LoginAsync` constructs an `IdentityClientConfiguration` (from `Volo.Abp.IdentityModel`) targeting the OIDC password grant and the public CLI client:
+
+```csharp
+public async Task LoginAsync(string userName, string password, string organizationName = null)
+{
+    var configuration = new IdentityClientConfiguration(
+        CliUrls.AccountAbpIo,
+        "abpio offline_access",
+        "abp-cli",
+        null,
+        OidcConstants.GrantTypes.Password,
+        userName,
+        password
+    );
+
+    if (!organizationName.IsNullOrWhiteSpace())
+    {
+        configuration["[o]abp-organization-name"] = organizationName;
+    }
+
+    var accessToken = await AuthenticationService.GetAccessTokenAsync(configuration);
+
+    if (!Directory.Exists(CliPaths.Root))
+    {
+        Directory.CreateDirectory(CliPaths.Root);
+    }
+    File.WriteAllText(CliPaths.AccessToken, accessToken, Encoding.UTF8);
+}
+```
+
+Key points:
+
+- The scope `"abpio offline_access"` requests a refresh token so the access token can outlive its short lifetime without re-prompting.
+- The client id `"abp-cli"` is a public OIDC client; no client secret is shipped in the binary.
+- `[o]abp-organization-name` uses the ABP IdentityModel option-prefix `[o]` to inject the value as a request body parameter on the token endpoint — this is how the server picks the right organisation context.
+- The access token is written to `CliPaths.AccessToken` as plain UTF-8. There is no OS-level keychain integration; the security boundary is the user's home directory.
+
+### The device-code grant
+
+`AuthService.DeviceLoginAsync` is the 2FA-friendly path. It uses the same `IIdentityModelAuthenticationService`:
+
+```csharp
+public async Task DeviceLoginAsync()
+{
+    var configuration = new IdentityClientConfiguration(
+        CliUrls.AccountAbpIo,
+        "abpio offline_access",
+        "abp-cli",
+        null,
+        OidcConstants.GrantTypes.DeviceCode
+    );
+
+    var accessToken = await AuthenticationService.GetAccessTokenAsync(configuration);
+
+    File.WriteAllText(CliPaths.AccessToken, accessToken, Encoding.UTF8);
+}
+```
+
+The device grant prints a verification URL and a user code; the user opens the URL in any browser, signs in (potentially completing 2FA), enters the code, and the CLI polls until the server returns a token.
+
+### Fetching the profile
+
+`GetLoginInfoAsync` is consumed by both `abp login-info` and the device-code login finalisation:
+
+```csharp
+public async Task<LoginInfo> GetLoginInfoAsync()
+{
+    if (!IsLoggedIn()) return null;
+
+    var url = $"{CliUrls.AccountAbpIo}api/license/login-info";
+    var client = CliHttpClientFactory.CreateClient();
+
+    using (var response = await client.GetHttpResponseMessageWithRetryAsync(
+               url, CancellationTokenProvider.Token, Logger))
+    {
+        if (!response.IsSuccessStatusCode)
+        {
+            Logger.LogError($"Remote server returns '{response.StatusCode}'");
+            return null;
+        }
+
+        await RemoteServiceExceptionHandler.EnsureSuccessfulHttpResponseAsync(response);
+        var responseContent = await response.Content.ReadAsStringAsync();
+        return JsonSerializer.Deserialize<LoginInfo>(responseContent);
+    }
+}
+```
+
+`CliHttpClientFactory.CreateClient()` defaults to attaching the bearer token from `CliPaths.AccessToken`. The retry helper handles transient `5xx` and network errors with backoff — see [/cli/cli-core-abstractions](/cli/cli-core-abstractions) for the HTTP client layer.
+
+### Multi-organisation pre-check
+
+`CheckMultipleOrganizationsAsync` is the helper `LoginCommand` calls before prompting for the password:
+
+```csharp
+public async Task<bool> CheckMultipleOrganizationsAsync(string username)
+{
+    var url = $"{CliUrls.AccountAbpIo}api/license/check-multiple-organizations?username={username}";
+    var client = CliHttpClientFactory.CreateClient();
+
+    using (var response = await client.GetHttpResponseMessageWithRetryAsync(
+               url, CancellationTokenProvider.Token, Logger))
+    {
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new Exception($"ERROR: Remote server returns '{response.StatusCode}'");
+        }
+
+        await RemoteServiceExceptionHandler.EnsureSuccessfulHttpResponseAsync(response);
+        var responseContent = await response.Content.ReadAsStringAsync();
+        return JsonSerializer.Deserialize<bool>(responseContent);
+    }
+}
+```
+
+This endpoint is anonymous — it returns whether the username belongs to multiple organisations without confirming whether the username exists.
+
+### Logout
+
+`LogoutAsync` deletes both the access-token file and the cached `.Lic` file, *and* notifies the server to revoke the token:
+
+```csharp
+public async Task LogoutAsync()
+{
+    string accessToken = null;
+    if (File.Exists(CliPaths.AccessToken))
+    {
+        accessToken = File.ReadAllText(CliPaths.AccessToken);
+        File.Delete(CliPaths.AccessToken);
+    }
+
+    if (File.Exists(CliPaths.Lic))
+    {
+        if (!string.IsNullOrWhiteSpace(accessToken))
+        {
+            await LogoutAsync(accessToken);
+        }
+        File.Delete(CliPaths.Lic);
+    }
+}
+
+private async Task LogoutAsync(string accessToken)
+{
+    try
+    {
+        var client = CliHttpClientFactory.CreateClient();
+        var content = new StringContent(
+            JsonSerializer.Serialize(new { token = accessToken }),
+            Encoding.UTF8, "application/json");
+
+        using (var response = await client.PostAsync(
+                   CliConsts.LogoutUrl, content, CancellationTokenProvider.Token))
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                Logger.LogWarning(
+                    $"Cannot logout from remote service! Response: {response.StatusCode}-{response.ReasonPhrase}");
+            }
+        }
+    }
+    catch (Exception e)
+    {
+        Logger.LogWarning($"Error occured while logging out from remote service. {e.Message}");
+    }
+}
+```
+
+The local files are deleted *unconditionally* — even if the remote call fails the user is considered logged out locally. That avoids the lockout case where a stale token survives a server-side revocation.
+
+### `IsLoggedIn`
+
+The presence of the access-token file is the canonical "logged in" signal:
+
+```csharp
+public static bool IsLoggedIn()
+{
+    return File.Exists(CliPaths.AccessToken);
+}
+```
+
+This is a *static* method on `AuthService` because non-DI callers — `TemplateInfoProvider`, `AbpIoApiKeyService`, and a couple of guard checks in `SuiteCommand` — need to gate behaviour on it without resolving an instance.
+
+## `LogoutCommand` and `LoginInfoCommand`
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/LogoutCommand.cs` is six effective lines — its `ExecuteAsync` simply calls `await AuthService.LogoutAsync()` and logs "You are logged out.". Its `GetUsageInfo()` returns `string.Empty` and `GetShortDescription()` returns `"Sign out from " + CliUrls.AccountAbpIo + "."`.
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/LoginInfoCommand.cs` is the read-side counterpart — it guards on `AuthService.IsLoggedIn()`, calls `AuthService.GetLoginInfoAsync()`, and prints each property of the returned `LoginInfo` (`Name`, `Surname`, `Username`, `EmailAddress`, `Organization`) via a `StringBuilder` and the logger.
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Auth/LoginInfo.cs` is the DTO:
+
+```csharp
+public class LoginInfo
+{
+    public Guid? Id { get; set; }
+    public string Name { get; set; }
+    public string Surname { get; set; }
+    public string Username { get; set; }
+    public string EmailAddress { get; set; }
+    public string Organization { get; set; }
+    public bool HasSourceCodeAccess { get; set; }
+}
+```
+
+`HasSourceCodeAccess` is the gate the source-code download flow checks before attempting a paid-template fetch.
+
+## The licensing bridge: `IApiKeyService`
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Licensing/IApiKeyService.cs` is what every command that needs entitlement asks. One method:
+
+```csharp
+public interface IApiKeyService
+{
+    Task<DeveloperApiKeyResult> GetApiKeyOrNullAsync(bool invalidateCache = false);
+}
+```
+
+The default implementation in `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Licensing/AbpIoApiKeyService.cs` short-circuits when not logged in, caches the result in-memory for the lifetime of the scope, and exchanges the access token for an API key via `api/license/api-key`:
+
+```csharp
+public async Task<DeveloperApiKeyResult> GetApiKeyOrNullAsync(bool invalidateCache = false)
+{
+    if (!AuthService.IsLoggedIn())
+    {
+        return null;
+    }
+
+    if (invalidateCache) { _apiKeyResult = null; }
+    if (_apiKeyResult != null) { return _apiKeyResult; }
+
+    var url = $"{CliUrls.AccountAbpIo}api/license/api-key";
+    var client = _cliHttpClientFactory.CreateClient();
+
+    using (var response = await client.GetHttpResponseMessageWithRetryAsync(
+               url, CancellationTokenProvider.Token, _logger))
+    {
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new Exception($"ERROR: Remote server returns '{response.StatusCode}'");
+        }
+
+        await RemoteServiceExceptionHandler.EnsureSuccessfulHttpResponseAsync(response);
+
+        var responseContent = await response.Content.ReadAsStringAsync();
+        return JsonSerializer.Deserialize<DeveloperApiKeyResult>(responseContent);
+    }
+}
+```
+
+The instance-level `_apiKeyResult` field is a per-scope cache; commands that loop (such as `add-module` adding several packages) reuse the result without re-hitting the server.
+
+## `DeveloperApiKeyResult` and `LicenseType`
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Licensing/DeveloperApiKeyResult.cs` is the response DTO:
+
+```csharp
+public class DeveloperApiKeyResult
+{
+    public bool HasActiveLicense { get; set; }
+    public string OrganizationName { get; set; }
+    public string ApiKey { get; set; }
+    public DateTime? LicenseEndTime { get; set; }
+    public DateTime? LicenseStartTime { get; set; }
+    public bool CanDownloadSourceCode { get; set; }
+    public string LicenseCode { get; set; }
+    public string ErrorMessage { get; set; }
+    public LicenseErrorType? ErrorType { get; set; }
+    public LicenseType LicenseType { get; set; }
+    public bool IsTrialLicense { get; set; }
+
+    public enum LicenseErrorType
+    {
+        NotAuthenticated = 1,
+        NotMemberOfAnOrganization = 2,
+        NoActiveLicense = 3,
+        NotDeveloperOfTheOrganization = 4
+    }
+}
+```
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Licensing/LicenseType.cs` enumerates the sales tiers:
+
+```csharp
+public enum LicenseType : byte
+{
+    Personal = 1,
+    Team = 2,
+    Business = 3,
+    Enterprise = 4,
+    Personal_Discounted = 5,
+    Team_Discounted = 6,
+    Business_Discounted = 7,
+    Enterprise_Discounted = 8,
+}
+```
+
+Two fields drive the template pipeline:
+
+- `ApiKey` is the per-developer token the CLI later forwards to the private NuGet feed (`nuget.abp.io`) and the template-download endpoint.
+- `LicenseCode` is the value that ends up in `appsettings.json` after the pipeline runs.
+
+## How the pro path consumes the API key
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/TemplateProjectBuilder.cs` is the one that ties auth, licensing, and the pipeline together. The relevant body is:
+
+```csharp
+DeveloperApiKeyResult apiKeyResult = null;
+
+#if DEBUG
+    // In DEBUG builds, an "apiKeyResult" section in user-secrets overrides the server call.
+    var apiKeyResultSection = _configuration.GetSection("apiKeyResult");
+    if (apiKeyResultSection.Exists())
+    {
+        apiKeyResult = apiKeyResultSection.Get<DeveloperApiKeyResult>();
+    }
+    if (apiKeyResult == null)
+    {
+        apiKeyResult = await ApiKeyService.GetApiKeyOrNullAsync();
+    }
+#else
+    apiKeyResult = await ApiKeyService.GetApiKeyOrNullAsync();
+#endif
+
+if (apiKeyResult != null)
+{
+    if (apiKeyResult.ApiKey != null)
+    {
+        args.ExtraProperties["api-key"] = apiKeyResult.ApiKey;
+    }
+    else if (templateInfo.Name == AppProTemplate.TemplateName)
+    {
+        throw new UserFriendlyException(apiKeyResult.ErrorMessage);
+    }
+}
+
+if (apiKeyResult?.LicenseCode != null)
+{
+    args.ExtraProperties["license-code"] = apiKeyResult.LicenseCode;
+}
+```
+
+Three behaviours emerge:
+
+1. Anonymous users skip the API-key fetch (`AuthService.IsLoggedIn` returns false → `GetApiKeyOrNullAsync` returns null).
+2. Logged-in users without entitlement get a `UserFriendlyException` *only* if they explicitly asked for `AppProTemplate.TemplateName`. The open-source `AppTemplate` builds fine for everyone.
+3. `args.ExtraProperties["api-key"]` and `args.ExtraProperties["license-code"]` become the inputs to the pipeline steps.
+
+In `DEBUG` builds, an `apiKeyResult` section in user-secrets configuration overrides the server call — convenient for offline development of the template pipeline.
+
+## `LicenseCodeReplaceStep` — splicing the code
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/Building/Steps/LicenseCodeReplaceStep.cs` is the pipeline step appended for `*-pro` templates by `TemplateProjectBuildPipelineBuilder`. It walks every appsettings file and substitutes the placeholder constant from `CliConsts`:
+
+```csharp
+public class LicenseCodeReplaceStep : ProjectBuildPipelineStep
+{
+    public override void Execute(ProjectBuildContext context)
+    {
+        var licenseCode = context.BuildArgs.ExtraProperties.GetOrDefault("license-code");
+
+        var appSettingsJsonFiles = context.Files.Where(f =>
+            f.Name.EndsWith(CliConsts.AppSettingsJsonFileName, StringComparison.OrdinalIgnoreCase) ||
+            f.Name.EndsWith(CliConsts.AppSettingsSecretJsonFileName, StringComparison.OrdinalIgnoreCase));
+
+        foreach (var appSettingsJson in appSettingsJsonFiles)
+        {
+            appSettingsJson.ReplaceText(CliConsts.LicenseCodePlaceHolder, licenseCode);
+        }
+    }
+}
+```
+
+`CliConsts.LicenseCodePlaceHolder` is the literal string `"<LICENSE_CODE/>"`:
+
+```csharp
+public static class CliConsts
+{
+    public static string LicenseCodePlaceHolder = @"<LICENSE_CODE/>";
+
+    public static string AppSettingsJsonFileName       = "appsettings.json";
+    public static string AppSettingsSecretJsonFileName = "appsettings.secrets.json";
+
+    public static string LogoutUrl = CliUrls.AccountAbpIo + "api/license/logout";
+}
+```
+
+Pro templates ship with this placeholder in their `appsettings.json` files. After the step runs, the placeholder is replaced with the developer's actual license code so that the runtime license validator inside the generated solution can call home with a real value. For details on the broader pipeline see [/cli/project-building](/cli/project-building).
+
+## Pro-template auto-selection
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/TemplateInfoProvider.cs:GetDefaultAsync` uses the same plumbing — but only the login check, not the full API-key exchange — to pick the default template:
+
+```csharp
+public async Task<TemplateInfo> GetDefaultAsync()
+{
+    var defaultTemplateName = await CheckProLicenseAsync()
+        ? AppProTemplate.TemplateName
+        : AppTemplate.TemplateName;
+    return Get(defaultTemplateName);
+}
+
+private async Task<bool> CheckProLicenseAsync()
+{
+    if (!AuthService.IsLoggedIn()) return false;
+
+    try
+    {
+        var url = $"{CliUrls.AccountAbpIo}api/license/check-user";
+        var client = _cliHttpClientFactory.CreateClient();
+
+        using (var response = await client.GetHttpResponseMessageWithRetryAsync(
+                   url, CancellationTokenProvider.Token, Logger))
+        {
+            if (!response.IsSuccessStatusCode)
+                throw new Exception($"ERROR: Remote server returns '{response.StatusCode}'");
+
+            await RemoteServiceExceptionHandler.EnsureSuccessfulHttpResponseAsync(response);
+            var responseContent = await response.Content.ReadAsStringAsync();
+            return JsonSerializer.Deserialize<bool>(responseContent);
+        }
+    }
+    catch (Exception) { return false; }
+}
+```
+
+A failure here defaults to "false" — the CLI never fails closed against a flaky `account.abp.io`; it just falls back to the open-source template.
+
+## Auth-aware commands beyond the three core verbs
+
+Several other commands depend on the same auth/licensing plumbing. `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/SuiteCommand.cs` reads `_authService.GetLoginInfoAsync()` at the top of `ExecuteAsync` (in release builds) and refuses to install the Suite without a login. `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/GetSourceCommand.cs` reaches `ModuleProjectBuilder`, which consults `IApiKeyService` for entitlement before downloading commercial module source. The `abp add-module` path (covered in [/cli/project-modification](/cli/project-modification)) goes through `SolutionModuleAdder`, which installs open-source modules without authentication but needs the API key for `*-pro` modules.
+
+## Commercial license validation: where it plugs in
+
+The open-source repository contains the authentication and API-key plumbing but *not* the runtime license validator that ABP Commercial templates ship with. The CLI's contribution is to splice the license code into `appsettings.json` (`LicenseCodeReplaceStep`) and to set the API key as an extra property so the generated solution's `nuget.config` can point at `https://nuget.abp.io/{api-key}/v3/index.json` (URL built by `CliUrls.GetNuGetServiceIndexUrl`):
+
+```csharp
+public static string GetNuGetServiceIndexUrl(string apiKey)
+{
+    return $"{NuGetRootPath}{apiKey}/v3/index.json";
+}
+```
+
+A commercial license validator service running inside the generated host (registered through the commercial modules) then reads the spliced license code, contacts `account.abp.io`, and gates the commercial features. The validator interface is not part of this repository, but the CLI's responsibility ends at producing a solution where the license code, the NuGet feed URL, and the package references are all coherent.
+
+## How `abp logout` interacts with cached state
+
+Beyond deleting `CliPaths.AccessToken` and `CliPaths.Lic`, `LogoutAsync` posts to `${AccountAbpIo}api/license/logout` to revoke the token server-side. The `AbpIoApiKeyService` in-memory cache is *not* explicitly invalidated by logout because the CLI process exits between commands; the next command sees `IsLoggedIn() == false` and returns null without contacting the server.
+
+## Security boundary summary
+
+The access token lives at `~/.abp/cli/access-token.bin` as plain text — anyone who can read the user profile can impersonate the developer to `account.abp.io`, because the security boundary is the OS user. The license cache at `Path.GetTempPath()/AbpLicense.bin` is filename-obfuscated but not encrypted. `nuget.abp.io` URLs include the API key as a path segment, so the generated `nuget.config` must be treated as a secret. All endpoints are HTTPS in production; development overrides (`WwwAbpIoDevelopment`, `AccountAbpIoDevelopment`) point at `localhost` with self-signed certs, and `CliHttpClientHandler` (registered by `AbpCliCoreModule`) bypasses certificate validation only when explicitly configured for the dev environment.
+
+## End-to-end: `abp new Acme.BookStore -t app-pro` after a fresh `abp login`
+
+Putting it all together: `abp login john` calls `AuthService.LoginAsync` which uses `IIdentityModelAuthenticationService.GetAccessTokenAsync` to POST to `${AccountAbpIo}connect/token` with the password grant; the resulting access token is written to `~/.abp/cli/access-token.bin`. Then `abp new Acme.BookStore -t app-pro` is dispatched by `CommandSelector` to `NewCommand`, which calls `TemplateProjectBuilder.BuildAsync`. The builder calls `ApiKeyService.GetApiKeyOrNullAsync()` which GETs `${AccountAbpIo}api/license/api-key` with the bearer token and deserialises into `DeveloperApiKeyResult`. The API key and license code are stuffed into `args.ExtraProperties["api-key"]` and `["license-code"]`. `TemplateProjectBuildPipelineBuilder.Build` appends `LicenseCodeReplaceStep` for `app-pro`; the pipeline executes and substitutes `<LICENSE_CODE/>` in every `appsettings.json`/`appsettings.secrets.json`. The zipped result is extracted into `args.OutputFolder`. The generated `nuget.config` references `https://nuget.abp.io/{api-key}/v3/index.json` so `dotnet restore` can pull the commercial packages. The user never types the license code, never copies the API key — both are wired in by the auth/licensing path inside the CLI.
+
+## Cross-references
+
+- HTTP client factory and exception-handler shared by every endpoint call: [/cli/cli-core-abstractions](/cli/cli-core-abstractions).
+- Pipeline that consumes `args.ExtraProperties["license-code"]`: [/cli/project-building](/cli/project-building).
+- Dispatch layer that resolves `LoginCommand`/`LogoutCommand`/`LoginInfoCommand`: [/cli/command-selector](/cli/command-selector).
+- The `abp new` surface that triggers the licensed pipeline: [/cli/templates-and-bundling](/cli/templates-and-bundling).
+- Startup-template catalogue referenced by `CheckProLicenseAsync`: [/templates/overview](/templates/overview).
+- The CLI overview: [/cli/overview](/cli/overview).

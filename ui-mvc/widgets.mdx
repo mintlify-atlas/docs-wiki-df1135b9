@@ -1,0 +1,586 @@
+---
+title: "Widgets — Reusable, Resource-Aware View Components"
+sidebarTitle: "Widgets"
+description: "How ABP turns ViewComponent classes into widgets — [Widget] attribute, WidgetDefinition, IWidgetManager, AbpViewComponentHelper, and per-page resource collection."
+---
+
+A widget in ABP is a view component plus metadata that describes the scripts, styles, and permissions it depends on. The widgets package — `Volo.Abp.AspNetCore.Mvc.UI.Widgets` — discovers them, renders them through a replaced `IViewComponentHelper`, and emits a deduplicated list of asset references for the page. This deep dive walks every type in `framework/src/Volo.Abp.AspNetCore.Mvc.UI.Widgets/Volo/Abp/AspNetCore/Mvc/UI/Widgets/`, shows how the `[Widget]` attribute is consumed at startup, and shows how a Razor page ends up rendering `<div class="abp-widget-wrapper" ...>` around the original view component.
+
+## Why widgets exist
+
+Plain ASP.NET Core view components have no notion of "this fragment needs `chart.js` and the `Dashboards` permission". Widgets address three gaps:
+
+| Concern | View component alone | Widget |
+| --- | --- | --- |
+| Per-fragment scripts/styles | Author has to remember to add them in the page | Declared on the type via `[Widget(ScriptFiles=...)]` |
+| Authorization | Caller has to check before rendering | Declared via `RequiredPolicies` and enforced by `IWidgetManager` |
+| Auto-refresh | Manual | `RefreshUrl` / `AutoInitialize` baked in |
+| Dedup across same page | Manual | `IPageWidgetManager` tracks per request |
+
+## Module wiring
+
+`framework/src/Volo.Abp.AspNetCore.Mvc.UI.Widgets/Volo/Abp/AspNetCore/Mvc/UI/Widgets/AbpAspNetCoreMvcUiWidgetsModule.cs`:
+
+```csharp
+[DependsOn(
+    typeof(AbpAspNetCoreMvcUiBootstrapModule),
+    typeof(AbpAspNetCoreMvcUiBundlingModule)
+)]
+public class AbpAspNetCoreMvcUiWidgetsModule : AbpModule
+{
+    public override void PreConfigureServices(ServiceConfigurationContext context)
+    {
+        PreConfigure<IMvcBuilder>(mvcBuilder =>
+        {
+            mvcBuilder.AddApplicationPartIfNotExists(typeof(AbpAspNetCoreMvcUiWidgetsModule).Assembly);
+        });
+
+        AutoAddWidgets(context.Services);
+    }
+
+    public override void ConfigureServices(ServiceConfigurationContext context)
+    {
+        context.Services.AddTransient<DefaultViewComponentHelper>();
+
+        Configure<AbpVirtualFileSystemOptions>(options =>
+        {
+            options.FileSets.AddEmbedded<AbpAspNetCoreMvcUiWidgetsModule>();
+        });
+    }
+
+    private static void AutoAddWidgets(IServiceCollection services)
+    {
+        var widgetTypes = new List<Type>();
+
+        services.OnRegistered(context =>
+        {
+            if (WidgetAttribute.IsWidget(context.ImplementationType))
+            {
+                widgetTypes.Add(context.ImplementationType);
+            }
+        });
+
+        services.Configure<AbpWidgetOptions>(options =>
+        {
+            foreach (var widgetType in widgetTypes)
+            {
+                options.Widgets.Add(new WidgetDefinition(widgetType));
+            }
+        });
+    }
+}
+```
+
+The key call is `services.OnRegistered(...)` — ABP's DI extension hooks every type registration and picks ones that pass `WidgetAttribute.IsWidget(type)`. Each is wrapped in a `WidgetDefinition` and appended to `AbpWidgetOptions.Widgets`. The trade-off is that widgets are discovered transparently — no need to register them manually — but only assemblies whose modules participate in DI are scanned.
+
+## The `[Widget]` attribute
+
+`Volo/Abp/AspNetCore/Mvc/UI/Widgets/WidgetAttribute.cs`:
+
+```csharp
+[AttributeUsage(AttributeTargets.Class)]
+public class WidgetAttribute : Attribute
+{
+    public string[]? StyleFiles { get; set; }
+    public Type[]? StyleTypes { get; set; }
+    public string[]? ScriptFiles { get; set; }
+    public Type[]? ScriptTypes { get; set; }
+    public string? DisplayName { get; set; }
+    public Type? DisplayNameResource { get; set; }
+    public string[]? RequiredPolicies { get; set; }
+    public bool RequiresAuthentication { get; set; }
+    public string? RefreshUrl { get; set; }
+    public bool AutoInitialize { get; set; }
+
+    public static bool IsWidget(Type type)
+    {
+        return type.IsSubclassOf(typeof(ViewComponent)) &&
+               type.IsDefined(typeof(WidgetAttribute), true);
+    }
+
+    public static WidgetAttribute Get(Type viewComponentType)
+    {
+        return viewComponentType.GetCustomAttribute<WidgetAttribute>(true)
+               ?? throw new AbpException($"Given type '{viewComponentType.AssemblyQualifiedName}' does not declare a {typeof(WidgetAttribute).AssemblyQualifiedName}");
+    }
+}
+```
+
+| Attribute property | Use |
+| --- | --- |
+| `ScriptFiles` / `StyleFiles` | Absolute paths added to the global asset list |
+| `ScriptTypes` / `StyleTypes` | Bundle contributor types (see [Bundling](./bundling)) — pulls in transitive dependencies |
+| `DisplayName` / `DisplayNameResource` | Localizable name for use in admin UIs |
+| `RequiredPolicies` | One or more policy names ANDed together |
+| `RequiresAuthentication` | Quick "must be logged in" gate; ignored if `RequiredPolicies` is set |
+| `RefreshUrl` | URL the widget will POST to for re-render |
+| `AutoInitialize` | Tells client-side `widget-manager.js` to run init on DOM ready |
+
+### Example widget
+
+```csharp
+[Widget(
+    StyleFiles = new[] { "/widgets/sales-chart/sales-chart.css" },
+    ScriptFiles = new[] { "/widgets/sales-chart/sales-chart.js" },
+    ScriptTypes = new[] { typeof(ChartjsScriptContributor) },
+    RequiredPolicies = new[] { "MyApp.Dashboard.SalesChart" },
+    AutoInitialize = true,
+    RefreshUrl = "/Widgets/SalesChartRefresh")]
+public class SalesChartViewComponent : AbpViewComponent
+{
+    public IViewComponentResult Invoke(int days = 30) => View(/* ... */);
+}
+```
+
+## `WidgetDefinition`
+
+`Volo/Abp/AspNetCore/Mvc/UI/Widgets/WidgetDefinition.cs` consumes the attribute and exposes a fluent API:
+
+```csharp
+public class WidgetDefinition
+{
+    [NotNull] public string Name { get; }
+    [NotNull] public WidgetAttribute WidgetAttribute { get; }
+    [NotNull] public ILocalizableString DisplayName { get; set; }
+    [NotNull] public Type ViewComponentType { get; }
+    [NotNull] public List<string> RequiredPolicies { get; }
+    public bool RequiresAuthentication { get; set; }
+    [NotNull] public List<WidgetResourceItem> Styles { get; }
+    [NotNull] public List<WidgetResourceItem> Scripts { get; }
+    public string? RefreshUrl { get; set; }
+    public bool AutoInitialize { get; set; }
+
+    public WidgetDefinition([NotNull] Type viewComponentType, ILocalizableString? displayName = null)
+    {
+        ViewComponentType = Check.NotNull(viewComponentType, nameof(viewComponentType));
+        WidgetAttribute = WidgetAttribute.Get(viewComponentType);
+        Name = GetWidgetName(viewComponentType);
+        DisplayName = displayName ?? GetDisplayName(WidgetAttribute, Name);
+        RequiredPolicies = GetRequiredPolicies(WidgetAttribute);
+        RequiresAuthentication = WidgetAttribute.RequiresAuthentication;
+        Styles = GetStyles(WidgetAttribute);
+        Scripts = GetScripts(WidgetAttribute);
+        RefreshUrl = WidgetAttribute.RefreshUrl;
+        AutoInitialize = WidgetAttribute.AutoInitialize;
+    }
+    // ...
+}
+```
+
+### Name resolution
+
+```csharp
+private static string GetWidgetName(Type viewComponentType)
+{
+    var viewComponentAttr = viewComponentType
+        .GetCustomAttributes(typeof(ViewComponentAttribute), true)
+        .FirstOrDefault() as ViewComponentAttribute;
+
+    if (viewComponentAttr?.Name != null)
+    {
+        return viewComponentAttr.Name;
+    }
+
+    return viewComponentType.Name.RemovePostFix("ViewComponent");
+}
+```
+
+A view component named `SalesChartViewComponent` becomes the widget named `SalesChart`. Override by placing `[ViewComponent(Name = "SalesChartV2")]` on the class.
+
+### Resource items
+
+`Volo/Abp/AspNetCore/Mvc/UI/Widgets/WidgetResourceItem.cs`:
+
+```csharp
+public class WidgetResourceItem
+{
+    public string? Src { get; }
+    public Type? Type { get; }
+
+    public WidgetResourceItem([NotNull] string src) { Src = Check.NotNullOrWhiteSpace(src, nameof(src)); }
+    public WidgetResourceItem([NotNull] Type type) { Type = Check.NotNull(type, nameof(type)); }
+}
+```
+
+A resource item is either a literal path or a bundle contributor type — letting widgets reuse the contributor lifecycle from [bundling](./bundling).
+
+### Fluent extension
+
+```csharp
+public WidgetDefinition WithRequiredPolicies(params string[] policyNames);
+public WidgetDefinition WithRequiresAuthentication(bool value = true);
+public WidgetDefinition WithStyles(params string[] files);
+public WidgetDefinition WithStyles(params Type[] bundleContributorTypes);
+public WidgetDefinition WithScripts(params string[] files);
+public WidgetDefinition WithScripts(params Type[] bundleContributorTypes);
+public WidgetDefinition WithRefreshUrl(string refreshUrl);
+```
+
+If you cannot decorate a third-party view component with `[Widget]`, manually register it:
+
+```csharp
+Configure<AbpWidgetOptions>(options =>
+{
+    options.Widgets.Add<SalesChartViewComponent>()
+        .WithScripts("/widgets/sales-chart.js")
+        .WithRequiredPolicies("MyApp.Dashboard.SalesChart");
+});
+```
+
+## `AbpWidgetOptions` and `WidgetDefinitionCollection`
+
+`AbpWidgetOptions.cs`:
+
+```csharp
+public class AbpWidgetOptions
+{
+    public WidgetDefinitionCollection Widgets { get; }
+
+    public AbpWidgetOptions()
+    {
+        Widgets = new WidgetDefinitionCollection();
+    }
+}
+```
+
+`WidgetDefinitionCollection.cs` indexes by both name and type:
+
+```csharp
+public class WidgetDefinitionCollection
+{
+    private readonly Dictionary<string, WidgetDefinition> _widgetsByName;
+    private readonly Dictionary<Type, WidgetDefinition> _widgetsByType;
+
+    public void Add(WidgetDefinition widget)
+    {
+        var existingWidget = _widgetsByName.GetOrDefault(widget.Name);
+        if (existingWidget != null)
+        {
+            _widgetsByType[existingWidget.ViewComponentType] = widget;
+        }
+
+        _widgetsByName[widget.Name] = widget;
+        _widgetsByType[widget.ViewComponentType] = widget;
+    }
+
+    public WidgetDefinition? Find(string name) => _widgetsByName.GetOrDefault(name);
+    public WidgetDefinition? Find(Type viewComponentType) => _widgetsByType.GetOrDefault(viewComponentType);
+}
+```
+
+Re-adding a widget for the same name overwrites the type lookup — a clean way to swap out the implementation type.
+
+## `IWidgetManager` — authorization
+
+`Volo/Abp/AspNetCore/Mvc/UI/Widgets/IWidgetManager.cs`:
+
+```csharp
+public interface IWidgetManager : ITransientDependency
+{
+    Task<bool> IsGrantedAsync(Type widgetComponentType);
+    Task<bool> IsGrantedAsync(string name);
+}
+```
+
+`Volo/Abp/AspNetCore/Mvc/UI/Widgets/WidgetManager.cs` implements both lookups and ANDs every `RequiredPolicies` entry:
+
+```csharp
+private async Task<bool> IsGrantedAsyncInternal(WidgetDefinition? widget, string wantedWidgetName)
+{
+    if (widget == null)
+    {
+        throw new ArgumentNullException(wantedWidgetName);
+    }
+
+    if (widget.RequiredPolicies.Any())
+    {
+        foreach (var requiredPolicy in widget.RequiredPolicies)
+        {
+            if (!(await AuthorizationService.AuthorizeAsync(requiredPolicy)).Succeeded)
+            {
+                return false;
+            }
+        }
+    }
+    else if (widget.RequiresAuthentication && !CurrentUser.IsAuthenticated)
+    {
+        return false;
+    }
+
+    return true;
+}
+```
+
+`RequiresAuthentication` is only consulted when `RequiredPolicies` is empty — matching the comment in `WidgetDefinition.RequiresAuthentication`.
+
+## `IPageWidgetManager` — per-request collection
+
+`Volo/Abp/AspNetCore/Mvc/UI/Widgets/IPageWidgetManager.cs`:
+
+```csharp
+public interface IPageWidgetManager
+{
+    bool TryAdd(WidgetDefinition widget);
+    IReadOnlyList<WidgetDefinition> GetAll();
+}
+```
+
+The implementation parks the in-progress list on `HttpContext.Items` keyed by `__AbpCurrentWidgets`:
+
+```csharp
+public class PageWidgetManager : IPageWidgetManager, IScopedDependency
+{
+    public const string HttpContextItemName = "__AbpCurrentWidgets";
+
+    public bool TryAdd(WidgetDefinition widget)
+    {
+        return GetWidgetList().AddIfNotContains(widget);
+    }
+
+    private List<WidgetDefinition> GetWidgetList()
+    {
+        var httpContext = _httpContextAccessor.HttpContext;
+        if (httpContext == null)
+        {
+            throw new AbpException($"{typeof(PageWidgetManager).AssemblyQualifiedName} should be used in a web request!");
+        }
+
+        var widgets = httpContext.Items[HttpContextItemName] as List<WidgetDefinition>;
+        if (widgets == null)
+        {
+            widgets = new List<WidgetDefinition>();
+            httpContext.Items[HttpContextItemName] = widgets;
+        }
+
+        return widgets;
+    }
+}
+```
+
+This is what allows the script/style emitters at the bottom of the layout to know which widgets the current page rendered.
+
+## `AbpViewComponentHelper` — replacing the default
+
+The package replaces ASP.NET's `IViewComponentHelper` so that `Component.InvokeAsync(...)` automatically wraps widget output with a marker `<div>` *and* registers the widget for resource emission. `Volo/Abp/AspNetCore/Mvc/UI/Widgets/AbpViewComponentHelper.cs`:
+
+```csharp
+[Dependency(ReplaceServices = true)]
+public class AbpViewComponentHelper : IViewComponentHelper, IViewContextAware, ITransientDependency
+{
+    public virtual async Task<IHtmlContent> InvokeAsync(string name, object? arguments)
+    {
+        var widget = Options.Widgets.Find(name);
+        if (widget == null)
+        {
+            return await DefaultViewComponentHelper.InvokeAsync(name, arguments);
+        }
+
+        return await InvokeWidgetAsync(arguments, widget);
+    }
+
+    public virtual async Task<IHtmlContent> InvokeAsync(Type componentType, object? arguments)
+    {
+        var widget = Options.Widgets.Find(componentType);
+        if (widget == null)
+        {
+            return await DefaultViewComponentHelper.InvokeAsync(componentType, arguments);
+        }
+
+        return await InvokeWidgetAsync(arguments, widget);
+    }
+
+    protected virtual async Task<IHtmlContent> InvokeWidgetAsync(object? arguments, WidgetDefinition widget)
+    {
+        PageWidgetManager.TryAdd(widget);
+
+        var wrapperAttributesBuilder = new StringBuilder($"class=\"abp-widget-wrapper\" data-widget-name=\"{widget.Name}\"");
+
+        if (widget.RefreshUrl != null)
+        {
+            wrapperAttributesBuilder.Append($" data-refresh-url=\"{widget.RefreshUrl}\"");
+        }
+
+        if (widget.AutoInitialize)
+        {
+            wrapperAttributesBuilder.Append(" data-widget-auto-init=\"true\"");
+        }
+
+        return new HtmlContentBuilder()
+            .AppendHtml($"<div {wrapperAttributesBuilder}>")
+            .AppendHtml(await DefaultViewComponentHelper.InvokeAsync(widget.ViewComponentType, arguments))
+            .AppendHtml("</div>");
+    }
+}
+```
+
+The wrapper carries three custom attributes consumed by `widget-manager.js`:
+
+| HTML attribute | Source | Purpose |
+| --- | --- | --- |
+| `data-widget-name` | `WidgetDefinition.Name` | Lookup key for client-side dispatch |
+| `data-refresh-url` | `WidgetDefinition.RefreshUrl` | URL the client uses to fetch new HTML |
+| `data-widget-auto-init="true"` | `WidgetDefinition.AutoInitialize` | Tells the client to run `init()` on DOM ready |
+
+## Resource emission
+
+Two view components produce `<link>` / `<script>` markup at layout level for every widget rendered on the page.
+
+`Components/WidgetStyles/WidgetStylesViewComponent.cs` — reads `IPageWidgetManager.GetAll()` and renders styles. The companion script counterpart `WidgetScriptsViewComponent.cs` does the same for `Scripts`:
+
+```csharp
+public class WidgetScriptsViewComponent : AbpViewComponent
+{
+    protected IPageWidgetManager PageWidgetManager { get; }
+    protected AbpWidgetOptions Options { get; }
+
+    public virtual IViewComponentResult Invoke()
+    {
+        return View(
+            "~/Volo/Abp/AspNetCore/Mvc/UI/Widgets/Components/WidgetScripts/Default.cshtml",
+            new WidgetResourcesViewModel
+            {
+                Widgets = PageWidgetManager.GetAll()
+            }
+        );
+    }
+}
+```
+
+The companion view iterates `Model.Widgets` and emits an `<abp-script src="...">` for every `Scripts[i].Src` and an `<abp-script-bundle><abp-script type="Type"/></abp-script-bundle>` chain for every `Scripts[i].Type`. The bundling tag helpers then dedupe and minify per the rules described in [Bundling](./bundling).
+
+## Rendering pipeline
+
+```mermaid
+sequenceDiagram
+    participant Layout as Layout .cshtml
+    participant Page as Razor page
+    participant Helper as AbpViewComponentHelper
+    participant PWM as IPageWidgetManager
+    participant Default as DefaultViewComponentHelper
+    participant Comp as MyChartViewComponent
+    participant SR as WidgetScripts view component
+
+    Page->>Helper: Component.InvokeAsync("SalesChart", new { days = 30 })
+    Helper->>Helper: WidgetDefinitionCollection.Find("SalesChart")
+    Helper->>PWM: TryAdd(widgetDefinition)
+    Helper->>Default: InvokeAsync(typeof(SalesChartViewComponent), args)
+    Default->>Comp: Invoke(...)
+    Comp-->>Default: ViewResult
+    Default-->>Helper: rendered HTML
+    Helper-->>Page: &lt;div class="abp-widget-wrapper" ...&gt;...&lt;/div&gt;
+
+    Note over Layout,SR: At layout's "Scripts" block
+    Layout->>SR: Component.Invoke("WidgetScripts")
+    SR->>PWM: GetAll()
+    PWM-->>SR: list of WidgetDefinition
+    SR-->>Layout: &lt;script&gt; / &lt;abp-script-bundle&gt; markup
+```
+
+## `WidgetDimensions`
+
+Reserved for dashboards that lay widgets out on a grid:
+
+```csharp
+public class WidgetDimensions
+{
+    public int Width { get; }
+    public int Height { get; }
+
+    public WidgetDimensions(int width, int height)
+    {
+        Width = width;
+        Height = height;
+    }
+}
+```
+
+It's not consumed by the core rendering pipeline — application modules use it to persist user-arranged dashboard layouts.
+
+## Checking authorization in a page
+
+```csharp
+public class IndexModel : AbpPageModel
+{
+    protected IWidgetManager WidgetManager { get; }
+
+    public bool CanSeeSalesChart { get; private set; }
+
+    public async Task OnGetAsync()
+    {
+        CanSeeSalesChart = await WidgetManager.IsGrantedAsync(typeof(SalesChartViewComponent));
+    }
+}
+```
+
+```cshtml
+@if (Model.CanSeeSalesChart)
+{
+    @await Component.InvokeAsync(typeof(SalesChartViewComponent), new { days = 30 })
+}
+```
+
+The two-step pattern (check before render) is intentional: the helper does not silently swallow an unauthorized widget. If you call `Component.InvokeAsync` for a widget the user can't access, the underlying view component still runs — checking with `IWidgetManager` first prevents wasted work.
+
+## Recipes
+
+<AccordionGroup>
+  <Accordion title="Register a widget that ships from a NuGet you cannot decorate">
+    ```csharp
+    Configure<AbpWidgetOptions>(options =>
+    {
+        options.Widgets.Add<ThirdPartyChartViewComponent>()
+            .WithScripts(typeof(ChartjsScriptContributor))
+            .WithRequiredPolicies("MyApp.Dashboard");
+    });
+    ```
+  </Accordion>
+  <Accordion title="Render a widget if the user has permission">
+    ```cshtml
+    @inject IWidgetManager Wm
+    @if (await Wm.IsGrantedAsync(typeof(MyWidgetViewComponent)))
+    {
+        @await Component.InvokeAsync(typeof(MyWidgetViewComponent))
+    }
+    ```
+  </Accordion>
+  <Accordion title="Add the widget script emitter to a theme layout">
+    ```cshtml
+    @section scripts {
+        @await Component.InvokeAsync("WidgetScripts")
+    }
+    @section styles {
+        @await Component.InvokeAsync("WidgetStyles")
+    }
+    ```
+  </Accordion>
+  <Accordion title="Auto-refresh a widget every minute">
+    ```csharp
+    [Widget(
+        ScriptFiles = new[] { "/widgets/clock/clock.js" },
+        RefreshUrl = "/Widgets/Clock",
+        AutoInitialize = true)]
+    public class ClockViewComponent : AbpViewComponent
+    {
+        public IViewComponentResult Invoke() => View();
+    }
+    ```
+    The client side (`widget-manager.js`) reads `data-refresh-url` and `data-widget-auto-init` from the wrapper `<div>` and calls `setInterval(refresh, ...)`.
+  </Accordion>
+</AccordionGroup>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Bundling" href="./bundling">
+    `[Widget(ScriptTypes = new[] { typeof(MyContributor) })]` reuses the contributor lifecycle.
+  </Card>
+  <Card title="Theme shared" href="./theme-shared">
+    Theme layouts call the `WidgetStyles` / `WidgetScripts` view components.
+  </Card>
+  <Card title="MVC UI core" href="./mvc-ui">
+    `AbpViewComponent` and `IAbpLazyServiceProvider`.
+  </Card>
+  <Card title="Basic theme" href="/modules/basic-theme">
+    A theme that exposes widgets out of the box.
+  </Card>
+</CardGroup>

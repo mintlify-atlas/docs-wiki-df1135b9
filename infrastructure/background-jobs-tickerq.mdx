@@ -1,0 +1,276 @@
+---
+title: "TickerQ Job Provider: TimeTicker, Retries and Priority"
+sidebarTitle: "TickerQ"
+description: "AbpTickerQBackgroundJobManager schedules TimeTickerEntity rows via ITimeTickerManager and registers per-args TickerFunctionDelegates in ABP applications."
+---
+
+`Volo.Abp.BackgroundJobs.TickerQ` is the **TickerQ adapter** for ABP's `IBackgroundJobManager`. TickerQ is a lightweight .NET task scheduler that persists tasks as rows and runs them based on `ExecutionTime`. The ABP adapter replaces the default manager with `AbpTickerQBackgroundJobManager`, registers a per‑args `TickerFunctionDelegate` for every known job, and ties the retry/priority semantics on `AbpBackgroundJobsTimeTickerConfiguration` into TickerQ's own retry knobs. This page covers the manager, the module's function registration, the configuration class, and the boundary between ABP and TickerQ types.
+
+## Files
+
+```
+framework/src/Volo.Abp.BackgroundJobs.TickerQ/Volo/Abp/BackgroundJobs/TickerQ/
+  AbpBackgroundJobsTickerQModule.cs
+  AbpBackgroundJobsTickerQOptions.cs
+  AbpBackgroundJobsTimeTickerConfiguration.cs
+  AbpTickerQBackgroundJobManager.cs
+
+framework/src/Volo.Abp.TickerQ/Volo/Abp/TickerQ/
+  AbpTickerQFunctionProvider.cs
+  AbpTickerQModule.cs
+```
+
+The matching periodic worker adapter — `Volo.Abp.BackgroundWorkers.TickerQ` — runs alongside but is out of scope for this page (it covers cron‑style recurring workers, not one‑shot jobs).
+
+## `AbpTickerQBackgroundJobManager`
+
+```csharp
+[Dependency(ReplaceServices = true)]
+public class AbpTickerQBackgroundJobManager : IBackgroundJobManager, ITransientDependency
+{
+    protected ITimeTickerManager<TimeTickerEntity> TimeTickerManager { get; }
+    protected AbpBackgroundJobOptions Options { get; }
+    protected AbpBackgroundJobsTickerQOptions TickerQOptions { get; }
+
+    public virtual async Task<string> EnqueueAsync<TArgs>(TArgs args,
+        BackgroundJobPriority priority = BackgroundJobPriority.Normal, TimeSpan? delay = null)
+    {
+        var job = Options.GetJob(typeof(TArgs));
+        var timeTicker = new TimeTickerEntity
+        {
+            Id = Guid.NewGuid(),
+            Function = job.JobName,
+            ExecutionTime = delay == null ? DateTime.UtcNow : DateTime.UtcNow.Add(delay.Value),
+            Request = TickerHelper.CreateTickerRequest<TArgs>(args),
+        };
+
+        var config = TickerQOptions.GetConfigurationOrNull(job.JobType);
+        if (config != null)
+        {
+            timeTicker.Retries        = config.Retries        ?? timeTicker.Retries;
+            timeTicker.RetryIntervals = config.RetryIntervals ?? timeTicker.RetryIntervals;
+            timeTicker.RunCondition   = config.RunCondition   ?? timeTicker.RunCondition;
+        }
+
+        var result = await TimeTickerManager.AddAsync(timeTicker);
+        return !result.IsSucceeded ? timeTicker.Id.ToString() : result.Result.Id.ToString();
+    }
+}
+```
+
+Mapping ABP concepts to TickerQ:
+
+| ABP | TickerQ |
+| --- | --- |
+| `BackgroundJobConfiguration.JobName` | `TimeTickerEntity.Function` |
+| `IBackgroundJobManager.EnqueueAsync<TArgs>(args, ..., delay)` | `TimeTickerEntity.ExecutionTime = UtcNow + delay` |
+| Serialized args | `TickerHelper.CreateTickerRequest<TArgs>(args)` |
+| `BackgroundJobPriority` enum | Ignored at the entity level; honored via `AbpBackgroundJobsTimeTickerConfiguration.Priority` |
+| Retry policy | `TimeTickerEntity.Retries` + `RetryIntervals` |
+| Conditional execution | `TimeTickerEntity.RunCondition` |
+
+The manager returns the TickerQ row id — either the AddAsync result id or the local one when the add failed (a deliberate "best effort" guarantee that the caller always gets something to look up).
+
+## `AbpBackgroundJobsTimeTickerConfiguration`
+
+Per‑job configuration (added through `AbpBackgroundJobsTickerQOptions.AddConfiguration<TJob>`):
+
+```csharp
+public class AbpBackgroundJobsTimeTickerConfiguration
+{
+    public int? Retries { get; set; }
+    public int[]? RetryIntervals { get; set; }
+    public TickerTaskPriority? Priority { get; set; }
+    public RunCondition? RunCondition { get; set; }
+}
+```
+
+| Property | Default | Effect |
+| --- | --- | --- |
+| `Retries` | `null` → TickerQ default | Max retry attempts. |
+| `RetryIntervals` | `null` | Array of intervals in seconds; one entry per retry attempt. Indexes past the array reuse the last value. |
+| `Priority` | `null` → `TickerTaskPriority.Normal` | Used by the function provider when TickerQ picks which due ticker to run next. |
+| `RunCondition` | `null` | Optional predicate that must be true at execution time, otherwise the ticker re‑schedules. |
+
+Usage:
+
+```csharp
+Configure<AbpBackgroundJobsTickerQOptions>(options =>
+{
+    options.AddConfiguration<SendEmailJob>(new AbpBackgroundJobsTimeTickerConfiguration
+    {
+        Retries = 5,
+        RetryIntervals = new[] { 10, 30, 60, 120, 300 },  // seconds
+        Priority = TickerTaskPriority.High,
+    });
+});
+```
+
+## `AbpBackgroundJobsTickerQOptions`
+
+```csharp
+public class AbpBackgroundJobsTickerQOptions
+{
+    private readonly Dictionary<Type, AbpBackgroundJobsTimeTickerConfiguration> _configurations;
+
+    public void AddConfiguration<TJob>(AbpBackgroundJobsTimeTickerConfiguration configuration)
+        => AddConfiguration(typeof(TJob), configuration);
+
+    public void AddConfiguration(Type jobType, AbpBackgroundJobsTimeTickerConfiguration configuration)
+        => _configurations[jobType] = configuration;
+
+    public AbpBackgroundJobsTimeTickerConfiguration? GetConfigurationOrNull<TJob>()
+        => GetConfigurationOrNull(typeof(TJob));
+
+    public AbpBackgroundJobsTimeTickerConfiguration? GetConfigurationOrNull(Type jobType)
+        => _configurations.GetValueOrDefault(jobType);
+}
+```
+
+The dictionary is keyed by **job type** (not args type) because configuration belongs to the job class, not its arguments.
+
+## Function registration in the module
+
+The module's `OnApplicationInitialization` is where the ABP→TickerQ bridge is woven. For each registered job it builds:
+
+1. A `TickerFunctionDelegate` that knows how to deserialize `TArgs` and invoke `IBackgroundJobExecuter`.
+2. A `(JobName → (CronExpression, Priority, Delegate))` entry in `AbpTickerQFunctionProvider.Functions`.
+3. A `(JobName → (FullName, ArgsType))` entry in `AbpTickerQFunctionProvider.RequestTypes` so deserialization at run time is type‑safe.
+
+```csharp
+public override void OnApplicationInitialization(ApplicationInitializationContext context)
+{
+    var abpBackgroundJobOptions = context.ServiceProvider.GetRequiredService<IOptions<AbpBackgroundJobOptions>>();
+    var abpBackgroundJobsTickerQOptions = context.ServiceProvider.GetRequiredService<IOptions<AbpBackgroundJobsTickerQOptions>>();
+    var tickerFunctionDelegates = new Dictionary<string, (string, TickerTaskPriority, TickerFunctionDelegate)>();
+    var requestTypes = new Dictionary<string, (string, Type)>();
+
+    foreach (var jobConfiguration in abpBackgroundJobOptions.Value.GetJobs())
+    {
+        var genericMethod = GetTickerFunctionDelegateMethod.MakeGenericMethod(jobConfiguration.ArgsType);
+        var tickerFunctionDelegate = (TickerFunctionDelegate)genericMethod.Invoke(null, [jobConfiguration.ArgsType])!;
+        var config = abpBackgroundJobsTickerQOptions.Value.GetConfigurationOrNull(jobConfiguration.JobType);
+        tickerFunctionDelegates.TryAdd(jobConfiguration.JobName,
+            (string.Empty, config?.Priority ?? TickerTaskPriority.Normal, tickerFunctionDelegate));
+        requestTypes.TryAdd(jobConfiguration.JobName, (jobConfiguration.ArgsType.FullName, jobConfiguration.ArgsType)!);
+    }
+
+    var abpTickerQFunctionProvider = context.ServiceProvider.GetRequiredService<AbpTickerQFunctionProvider>();
+    foreach (var fn in tickerFunctionDelegates) abpTickerQFunctionProvider.Functions.TryAdd(fn.Key, fn.Value);
+    foreach (var rt in requestTypes)            abpTickerQFunctionProvider.RequestTypes.TryAdd(rt.Key, rt.Value);
+}
+```
+
+`AbpTickerQFunctionProvider.cs` is the registry TickerQ reads from when it needs to invoke a function:
+
+```csharp
+public class AbpTickerQFunctionProvider : ISingletonDependency
+{
+    public Dictionary<string, (string, TickerTaskPriority, TickerFunctionDelegate)> Functions { get; }
+    public Dictionary<string, (string, Type)> RequestTypes { get; }
+}
+```
+
+The crucial trick is that ABP must produce **typed** delegates (one per `TArgs`) but expose them uniformly to TickerQ. The reflection trampoline `GetTickerFunctionDelegate<TArgs>(Type argsType)` does this:
+
+```csharp
+private static TickerFunctionDelegate GetTickerFunctionDelegate<TArgs>(Type argsType)
+{
+    return async (cancellationToken, serviceProvider, context) =>
+    {
+        var options = serviceProvider.GetRequiredService<IOptions<AbpBackgroundJobOptions>>().Value;
+        if (!options.IsJobExecutionEnabled)
+            throw new AbpException("Background job execution is disabled. …");
+
+        using (var scope = serviceProvider.CreateScope())
+        {
+            var jobExecuter = serviceProvider.GetRequiredService<IBackgroundJobExecuter>();
+            var args = await TickerRequestProvider.GetRequestAsync<TArgs>(context, cancellationToken);
+            var jobType = options.GetJob(typeof(TArgs)).JobType;
+            var jobExecutionContext = new JobExecutionContext(scope.ServiceProvider, jobType, args!,
+                cancellationToken: cancellationToken);
+            await jobExecuter.ExecuteAsync(jobExecutionContext);
+        }
+    };
+}
+```
+
+Each delegate:
+
+1. Checks the global `IsJobExecutionEnabled` flag.
+2. Creates a fresh DI scope (identical to all other providers).
+3. Uses `TickerRequestProvider.GetRequestAsync<TArgs>(context, cancellationToken)` to deserialize the args TickerQ persisted on `TimeTickerEntity.Request`.
+4. Constructs an ABP `JobExecutionContext` and dispatches through `IBackgroundJobExecuter.ExecuteAsync`.
+
+`MakeGenericMethod(jobConfiguration.ArgsType)` instantiates the right `<TArgs>` per job at module init time, then the resulting delegate is non‑generic from TickerQ's point of view.
+
+## Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant App as AppService
+    participant Mgr as AbpTickerQBackgroundJobManager
+    participant TM as ITimeTickerManager
+    participant DB as TickerQ store
+    participant TickerQ as TickerQ scheduler
+    participant Fn as TickerFunctionDelegate (per TArgs)
+    participant Exe as BackgroundJobExecuter
+
+    App->>Mgr: EnqueueAsync(args, delay)
+    Mgr->>Mgr: build TimeTickerEntity (Function, ExecutionTime, Request)
+    Mgr->>Mgr: layer config (Retries, RetryIntervals, Priority, RunCondition)
+    Mgr->>TM: AddAsync(timeTicker)
+    TM->>DB: persist row
+    Note over TickerQ,DB: scheduler polls; when ExecutionTime <= now, picks function
+    TickerQ->>Fn: invoke (cancellationToken, sp, context)
+    Fn->>Fn: open scope, deserialize TArgs from context.Request
+    Fn->>Exe: ExecuteAsync(JobExecutionContext)
+    Exe-->>Fn: ok / BackgroundJobExecutionException
+    Fn-->>TickerQ: propagate
+    Note over TickerQ: on failure, schedule retry per Retries + RetryIntervals
+```
+
+The retry math lives entirely on the TickerQ side; ABP only seeds the row's `Retries` / `RetryIntervals` slots.
+
+## Module dependencies
+
+```csharp
+[DependsOn(
+    typeof(AbpBackgroundJobsAbstractionsModule),
+    typeof(AbpTickerQModule)
+)]
+public class AbpBackgroundJobsTickerQModule : AbpModule { /* … */ }
+```
+
+`AbpTickerQModule` (from `Volo.Abp.TickerQ`) wires up the underlying TickerQ DI: `ITimeTickerManager<TimeTickerEntity>`, `AbpTickerQFunctionProvider`, and the host extension that starts the scheduler.
+
+## Comparison
+
+| Concern | Default | Hangfire | Quartz | RabbitMQ | TickerQ |
+| --- | --- | --- | --- | --- | --- |
+| Storage | EF/Mongo via `IBackgroundJobStore` | Hangfire `JobStorage` | Quartz job store | RabbitMQ queues | TickerQ EF entity |
+| Delay support | `NextTryTime` column | `BackgroundJob.Schedule` | `StartAt` | `x-message-ttl` delayed queue | `TimeTickerEntity.ExecutionTime` |
+| Retries | `AbpBackgroundJobWorkerOptions` exponential | `AutomaticRetryAttribute` | `AbpBackgroundJobQuartzOptions.RetryStrategy` | `BasicReject(requeue: true)` | `Retries` + `RetryIntervals[]` per row |
+| Priority | `BackgroundJobPriority` enum | Named queues | Trigger priority | n/a | `TickerTaskPriority` per function |
+| Conditional run | None | Filters | Listeners | None | `RunCondition` predicate |
+| Args type registration | Required | Required | Required | Required | Required + `TickerRequestProvider` registers ArgsType |
+
+## When to pick TickerQ
+
+| Scenario | Verdict |
+| --- | --- |
+| You need fine‑grained per‑retry intervals (not exponential) | ✓ `RetryIntervals = new[] { 5, 15, 60 }` |
+| You need conditional execution (e.g. "only run during business hours") | ✓ `RunCondition` |
+| You want a per‑function priority that the scheduler honors | ✓ `TickerTaskPriority` |
+| You already use TickerQ for cron workers | ✓ Share the scheduler with the worker side |
+| You need broker‑backed durability with redelivery semantics | Prefer RabbitMQ |
+
+## Cross‑references
+
+| Topic | See |
+| --- | --- |
+| Default in‑process runtime and `IBackgroundJobExecuter` | [Background jobs](/infrastructure/background-jobs) |
+| Other providers | [Hangfire](/infrastructure/background-jobs-hangfire) · [Quartz](/infrastructure/background-jobs-quartz) · [RabbitMQ jobs](/infrastructure/background-jobs-rabbitmq) |
+| Tenant entry during job execution | [Multi‑tenancy](/multi-tenancy/overview) |
+| Lifecycle including DI scope | [Background job execution flow](/flows/background-job-execution) |
+| EF/Mongo audit + job store implementations | [Background Jobs module](/modules/background-jobs-module) · [Audit Logging module](/modules/audit-logging) |

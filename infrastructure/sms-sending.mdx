@@ -1,0 +1,268 @@
+---
+title: "SMS sending: ISmsSender with Aliyun and Tencent Cloud"
+sidebarTitle: "SMS Sending"
+description: "Send transactional SMS from ABP through a provider-agnostic ISmsSender abstraction with Aliyun, Tencent Cloud and a logging null fallback."
+---
+
+ABP Framework treats SMS the same way it treats email — a single, narrow interface (`ISmsSender`) that your application code depends on, plus pluggable providers that talk to a vendor API. This page covers the `Volo.Abp.Sms` abstraction, the safe `NullSmsSender` default, the `Volo.Abp.Sms.Aliyun` provider against Dysmsapi, and the `Volo.Abp.Sms.TencentCloud` provider against `TencentCloud.Sms`.
+
+<Note>
+SMS providers usually require an approved template id and signature in addition to the phone number — both are passed through `SmsMessage.Properties`, not as first-class arguments.
+</Note>
+
+## ISmsSender
+
+The contract in `framework/src/Volo.Abp.Sms/Volo/Abp/Sms/ISmsSender.cs` is a single method:
+
+```csharp ISmsSender.cs
+public interface ISmsSender
+{
+    Task SendAsync(SmsMessage smsMessage);
+}
+```
+
+`SmsMessage` carries the destination, the text payload, and a free-form `Properties` dictionary that providers read for template ids, signatures, or vendor-specific fields:
+
+```csharp SmsMessage.cs
+public class SmsMessage
+{
+    public string PhoneNumber { get; }
+    public string Text { get; }
+    public IDictionary<string, object> Properties { get; }
+
+    public SmsMessage([NotNull] string phoneNumber, [NotNull] string text)
+    {
+        PhoneNumber = Check.NotNullOrWhiteSpace(phoneNumber, nameof(phoneNumber));
+        Text = Check.NotNullOrWhiteSpace(text, nameof(text));
+        Properties = new Dictionary<string, object>();
+    }
+}
+```
+
+`SmsSenderExtensions.SendAsync(sender, phoneNumber, text)` is the convenience overload for cases that do not need extra properties:
+
+```csharp SmsSenderExtensions.cs
+public static Task SendAsync(this ISmsSender smsSender, string phoneNumber, string text)
+    => smsSender.SendAsync(new SmsMessage(phoneNumber, text));
+```
+
+## NullSmsSender — the safe default
+
+`Volo.Abp.Sms` ships only the abstractions plus a development-time `NullSmsSender`. It is registered with `[Dependency(TryRegister = true)]` so any concrete provider you add replaces it transparently:
+
+```csharp NullSmsSender.cs
+[Dependency(TryRegister = true)]
+public class NullSmsSender : ISmsSender, ISingletonDependency
+{
+    public ILogger<NullSmsSender> Logger { get; set; } = NullLogger<NullSmsSender>.Instance;
+
+    public Task SendAsync(SmsMessage smsMessage)
+    {
+        Logger.LogWarning($"SMS Sending was not implemented! Using {nameof(NullSmsSender)}:");
+        Logger.LogWarning("Phone Number : " + smsMessage.PhoneNumber);
+        Logger.LogWarning("SMS Text     : " + smsMessage.Text);
+        return Task.CompletedTask;
+    }
+}
+```
+
+The warning text deliberately includes the phone number and body — that gives you a clear breadcrumb in logs when you forget to add a real provider in production.
+
+## Aliyun (Alibaba Cloud) provider
+
+`Volo.Abp.Sms.Aliyun` wraps the Alibaba Cloud `AlibabaCloud.SDK.Dysmsapi20170525` client. `AliyunSmsSender` reads its credentials from `AbpAliyunSmsOptions`:
+
+```csharp AbpAliyunSmsOptions.cs
+public class AbpAliyunSmsOptions
+{
+    public string AccessKeySecret { get; set; } = default!;
+    public string AccessKeyId { get; set; } = default!;
+    public string EndPoint { get; set; } = default!;
+}
+```
+
+The sender maps `SmsMessage` onto `AliyunSendSmsRequest`. The `SignName` and `TemplateCode` are pulled out of `Properties`, and the text payload is treated as the JSON `TemplateParam` string:
+
+```csharp AliyunSmsSender.cs
+public async Task SendAsync(SmsMessage smsMessage)
+{
+    var client = CreateClient();
+    await client.SendSmsAsync(new AliyunSendSmsRequest
+    {
+        PhoneNumbers = smsMessage.PhoneNumber,
+        SignName = smsMessage.Properties.GetOrDefault("SignName") as string,
+        TemplateCode = smsMessage.Properties.GetOrDefault("TemplateCode") as string,
+        TemplateParam = smsMessage.Text
+    });
+}
+
+protected virtual AliyunClient CreateClient()
+{
+    return new(new AliyunConfig
+    {
+        AccessKeyId = Options.AccessKeyId,
+        AccessKeySecret = Options.AccessKeySecret,
+        Endpoint = Options.EndPoint
+    });
+}
+```
+
+### Usage
+
+```csharp
+Configure<AbpAliyunSmsOptions>(o =>
+{
+    o.AccessKeyId = configuration["Aliyun:AccessKeyId"];
+    o.AccessKeySecret = configuration["Aliyun:AccessKeySecret"];
+    o.EndPoint = "dysmsapi.aliyuncs.com";
+});
+
+// Later, in your service:
+var msg = new SmsMessage("+8613800000000",
+    JsonSerializer.Serialize(new { code = "123456" }));
+msg.Properties["SignName"] = "MyCorp";
+msg.Properties["TemplateCode"] = "SMS_123456789";
+await _smsSender.SendAsync(msg);
+```
+
+Aliyun rejects messages without an approved template + signature pair, so this is **not** a free-form text channel.
+
+## Tencent Cloud provider
+
+`Volo.Abp.Sms.TencentCloud` is structurally identical but uses Tencent's `TencentCloud.Sms.V20210111` SDK. `AbpTencentCloudSmsOptions` carries the credential triple, the SMS app id, and the endpoint:
+
+```csharp AbpTencentCloudSmsOptions.cs
+public class AbpTencentCloudSmsOptions
+{
+    public string SmsSdkAppId { get; set; } = default!;
+    public string SecretKey { get; set; } = default!;
+    public string SecretId { get; set; } = default!;
+    public string Endpoint { get; set; } = "sms.tencentcloudapi.com";
+    public string Region { get; set; } = "ap-guangzhou";
+}
+```
+
+`TencentCloudSmsSender` reads property keys from `TencentCloudSmsProperties` (`SignName`, `TemplateId`), splits the text on commas to build the `TemplateParamSet`, and wraps everything in a `SendSmsRequest`:
+
+```csharp TencentCloudSmsSender.cs
+public virtual async Task SendAsync(SmsMessage smsMessage)
+{
+    var client = CreateClient();
+    await client.SendSms(new SendSmsRequest
+    {
+        SmsSdkAppId = Options.SmsSdkAppId,
+        SignName = smsMessage.Properties.GetOrDefault(TencentCloudSmsProperties.SignName) as string,
+        TemplateId = smsMessage.Properties.GetOrDefault(TencentCloudSmsProperties.TemplateId) as string,
+        TemplateParamSet = smsMessage.Text.Split(','),
+        PhoneNumberSet = [smsMessage.PhoneNumber]
+    });
+}
+
+protected virtual SmsClient CreateClient()
+{
+    var credential = new Credential { SecretId = Options.SecretId, SecretKey = Options.SecretKey };
+    var clientProfile = new ClientProfile
+    {
+        HttpProfile = new HttpProfile { Endpoint = Options.Endpoint }
+    };
+    return new SmsClient(credential, Options.Region, clientProfile);
+}
+```
+
+Use it like this:
+
+```csharp
+Configure<AbpTencentCloudSmsOptions>(o =>
+{
+    o.SmsSdkAppId = "1400123456";
+    o.SecretId = configuration["Tencent:SecretId"];
+    o.SecretKey = configuration["Tencent:SecretKey"];
+    // Endpoint and Region have working defaults.
+});
+
+var msg = new SmsMessage("+8613800000000", "123456,5");
+msg.Properties[TencentCloudSmsProperties.SignName] = "MyCorpSign";
+msg.Properties[TencentCloudSmsProperties.TemplateId] = "1234567";
+await _smsSender.SendAsync(msg);
+```
+
+The comma-separated payload maps to Tencent's positional `{1},{2},...` template parameters.
+
+## Provider comparison
+
+| Package | SDK | Required options | Key properties read from `SmsMessage.Properties` |
+| --- | --- | --- | --- |
+| `Volo.Abp.Sms` | — | — | (NullSmsSender, logs only) |
+| `Volo.Abp.Sms.Aliyun` | `AlibabaCloud.SDK.Dysmsapi20170525` | `AccessKeyId`, `AccessKeySecret`, `EndPoint` | `"SignName"`, `"TemplateCode"` |
+| `Volo.Abp.Sms.TencentCloud` | `TencentCloud.Sms.V20210111` | `SecretId`, `SecretKey`, `SmsSdkAppId` (+ optional `Endpoint`, `Region`) | `TencentCloudSmsProperties.SignName`, `TencentCloudSmsProperties.TemplateId` |
+
+Both providers are registered as `ITransientDependency` because the underlying SDK client is cheap to construct per call.
+
+## Dispatch flow
+
+```mermaid
+sequenceDiagram
+    participant App as Service
+    participant Sender as ISmsSender
+    participant Cloud as Vendor SMS API
+
+    App->>App: Build SmsMessage(phone, text)
+    App->>App: msg.Properties["SignName"] = "...";<br/>msg.Properties["TemplateCode"] = "...";
+    App->>Sender: SendAsync(msg)
+    Sender->>Cloud: HTTPS request (signed)
+    Cloud-->>Sender: SendSmsResponse
+    Sender-->>App: Task.CompletedTask
+```
+
+`SendSmsResponse` is currently consumed and discarded — if you need delivery status, override `SendAsync` and capture the SDK's response object yourself.
+
+## Adding a custom provider
+
+Implement `ISmsSender`, register with `[Dependency(ReplaceServices = true)]`, and you replace whatever provider was registered earlier:
+
+```csharp
+[Dependency(ReplaceServices = true)]
+public class TwilioSmsSender : ISmsSender, ITransientDependency
+{
+    private readonly AbpTwilioOptions _options;
+    public TwilioSmsSender(IOptionsMonitor<AbpTwilioOptions> options)
+        => _options = options.CurrentValue;
+
+    public async Task SendAsync(SmsMessage smsMessage)
+    {
+        TwilioClient.Init(_options.AccountSid, _options.AuthToken);
+        await MessageResource.CreateAsync(
+            to: new PhoneNumber(smsMessage.PhoneNumber),
+            from: new PhoneNumber(_options.From),
+            body: smsMessage.Text);
+    }
+}
+```
+
+Because `NullSmsSender` uses `TryRegister`, you do **not** need to remove it explicitly — your registration wins.
+
+## Where to call from
+
+- **Account confirmation / OTP** — the [Account module](/modules/account) is the most common caller; supply your own template ids per tenant.
+- **Notification module** — register `ISmsNotifier` to opt into ABP's notification pipeline that ultimately routes through `ISmsSender`.
+- **Application services** — inject `ISmsSender` directly for one-off flows (delivery alerts, fraud checks).
+
+Because `ISmsSender` has no async-queue counterpart (unlike `IEmailSender.QueueAsync`), wrap calls in a background job yourself when you don't want to block the request thread:
+
+```csharp
+await _backgroundJobManager.EnqueueAsync(new SendSmsJobArgs
+{
+    PhoneNumber = msg.PhoneNumber,
+    Text = msg.Text,
+    SignName = msg.Properties["SignName"] as string,
+    TemplateCode = msg.Properties["TemplateCode"] as string
+});
+```
+
+## See also
+
+- [/infrastructure/overview](/infrastructure/overview)
+- [/infrastructure/emailing-and-mailkit](/infrastructure/emailing-and-mailkit) — sibling channel with built-in queue support.
+- [/infrastructure/background-jobs](/infrastructure/background-jobs) — wrap `SendAsync` in a job for async sends.
+- [/infrastructure/text-templating](/infrastructure/text-templating) — render OTP/notification bodies before passing to `ISmsSender`.
+- [/multi-tenancy/current-tenant](/multi-tenancy/current-tenant) — per-tenant template ids.

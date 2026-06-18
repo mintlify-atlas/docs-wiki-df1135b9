@@ -1,0 +1,620 @@
+---
+title: "Service Proxying: Generators for C#, Angular, JavaScript"
+sidebarTitle: "Service Proxying"
+description: "How abp generate-proxy fetches api/abp/api-definition and dispatches to CSharp, Angular ng schematics, or JavaScript proxy generators."
+---
+
+The ABP Framework CLI exposes two verbs — `abp generate-proxy` and `abp remove-proxy` — that materialise type-safe HTTP clients for any ABP-hosted backend. Both verbs share an extensible registry, the `AbpCliServiceProxyOptions.Generators` dictionary, that ships with three implementations: a C# `ClientProxyBase` generator, an Angular wrapper around `@abp/ng.schematics`, and a JavaScript script generator backed by the runtime `JQueryProxyScriptGenerator`. This page walks the contracts, the shared `api/abp/api-definition` consumption, and each generator's specifics — all under `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ServiceProxying/` and `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/`.
+
+## The two commands
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/GenerateProxyCommand.cs` and `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/RemoveProxyCommand.cs` both derive from `ProxyCommandBase\<T\>`. The derivations only override `CommandName` (`"generate-proxy"` vs `"remove-proxy"`) and the help examples — every other concern lives on the base:
+
+```csharp
+public class GenerateProxyCommand : ProxyCommandBase<GenerateProxyCommand>
+{
+    public const string Name = "generate-proxy";
+
+    protected override string CommandName => Name;
+
+    public GenerateProxyCommand(
+        IOptions<AbpCliServiceProxyOptions> serviceProxyOptions,
+        IServiceScopeFactory serviceScopeFactory)
+        : base(serviceProxyOptions, serviceScopeFactory) { }
+    // ...
+}
+
+public class RemoveProxyCommand : ProxyCommandBase<RemoveProxyCommand>
+{
+    public const string Name = "remove-proxy";
+    protected override string CommandName => Name;
+    // ...
+}
+```
+
+Both verbs are registered in `AbpCliOptions.Commands` by `AbpCliCoreModule` (see [/cli/command-selector](/cli/command-selector)) and routed by the standard `CommandSelector`.
+
+## `ProxyCommandBase\<T\>` — shared dispatch
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/ProxyCommandBase.cs` is the workhorse. It validates the `-t|--type` option against the generator registry, opens a child scope, resolves the right `IServiceProxyGenerator`, and invokes it:
+
+```csharp
+public abstract class ProxyCommandBase<T> : IConsoleCommand, ITransientDependency where T : IConsoleCommand
+{
+    protected abstract string CommandName { get; }
+    protected AbpCliServiceProxyOptions ServiceProxyOptions { get; }
+    protected IServiceScopeFactory ServiceScopeFactory { get; }
+
+    public async Task ExecuteAsync(CommandLineArgs commandLineArgs)
+    {
+        var generateType = commandLineArgs.Options
+            .GetOrNull(Options.GenerateType.Short, Options.GenerateType.Long)?.ToUpper();
+
+        if (string.IsNullOrWhiteSpace(generateType))
+        {
+            throw new CliUsageException("Option Type is required" +
+                Environment.NewLine + GetUsageInfo());
+        }
+
+        if (!ServiceProxyOptions.Generators.ContainsKey(generateType))
+        {
+            throw new CliUsageException("Option Type value is invalid" +
+                Environment.NewLine + GetUsageInfo());
+        }
+
+        using (var scope = ServiceScopeFactory.CreateScope())
+        {
+            var generatorType = ServiceProxyOptions.Generators[generateType];
+            var serviceProxyGenerator = scope.ServiceProvider
+                .GetService(generatorType).As<IServiceProxyGenerator>();
+
+            await serviceProxyGenerator.GenerateProxyAsync(BuildArgs(commandLineArgs));
+        }
+    }
+}
+```
+
+Two things to notice:
+
+- The dictionary key is `commandLineArgs.Options["-t"].ToUpper()`. Since the registry keys are constants (`"CSHARP"`, `"NG"`, `"JS"`), case-folding lets the user type `-t csharp` or `-t CSharp` interchangeably.
+- The same base class powers *both* generation and removal — the generator is told which verb invoked it through `args.CommandName`, and the generator implementation branches accordingly.
+
+## `BuildArgs` and the option surface
+
+`ProxyCommandBase.BuildArgs` translates the parsed `CommandLineArgs` into a `GenerateProxyArgs`:
+
+```csharp
+private GenerateProxyArgs BuildArgs(CommandLineArgs commandLineArgs)
+{
+    var url           = commandLineArgs.Options.GetOrNull(Options.Url.Short, Options.Url.Long);
+    var target        = commandLineArgs.Options.GetOrNull(Options.Target.Long);
+    var module        = commandLineArgs.Options.GetOrNull(Options.Module.Short, Options.Module.Long) ?? "app";
+    var output        = commandLineArgs.Options.GetOrNull(Options.Output.Short, Options.Output.Long);
+    var apiName       = commandLineArgs.Options.GetOrNull(Options.ApiName.Short, Options.ApiName.Long);
+    var source        = commandLineArgs.Options.GetOrNull(Options.Source.Short, Options.Source.Long);
+    var workDirectory = commandLineArgs.Options.GetOrNull(Options.WorkDirectory.Short, Options.WorkDirectory.Long)
+                        ?? Directory.GetCurrentDirectory();
+    var folder        = commandLineArgs.Options.GetOrNull(Options.Folder.Long);
+    var serviceTypeArg = commandLineArgs.Options.GetOrNull(Options.ServiceType.Short, Options.ServiceType.Long);
+    var entryPointArg  = commandLineArgs.Options.GetOrNull(Options.EntryPoint.Short, Options.EntryPoint.Long);
+
+    ServiceType? serviceType = null;
+    if (!serviceTypeArg.IsNullOrWhiteSpace())
+    {
+        serviceType = serviceTypeArg.ToLower() == "application" ? ServiceType.Application
+                    : serviceTypeArg.ToLower() == "integration" ? ServiceType.Integration
+                    : ServiceType.All;
+    }
+
+    var withoutContracts = commandLineArgs.Options.ContainsKey(Options.WithoutContracts.Short) ||
+                           commandLineArgs.Options.ContainsKey(Options.WithoutContracts.Long);
+
+    return new GenerateProxyArgs(CommandName, workDirectory, module, url, output, target,
+        apiName, source, folder, serviceType, entryPointArg, withoutContracts,
+        commandLineArgs.Options);
+}
+```
+
+The help text printed by `GetUsageInfo` enumerates every option:
+
+```text
+abp generate-proxy
+
+-m|--module <module-name>                         (default: 'app')
+-wd|--working-directory <directory-path>          Execution directory.
+-u|--url <url>                                    API definition URL from.
+-t|--type <generate-type>                         The name of generate type (csharp, js, ng).
+
+  csharp
+     --without-contracts                          Avoid generating the interface, class, enum and dto types.
+     --folder <folder-name>                       (default: 'ClientProxies') Folder name to place generated CSharp code in.
+  js
+     -o|--output <output-name>                    JavaScript file path or folder to place generated code in.
+  ng
+     -a|--api-name <module-name>                  (default: 'default') The API endpoint defined in environment.ts.
+     -s|--source <source-name>                    (default: 'defaultProject') Angular project name to resolve from.
+     -p|--prompt                                  Asks the options from the command line prompt
+     --target <target-name>                       (default: 'defaultProject') Angular project name to place code in.
+```
+
+## `GenerateProxyArgs` and `ServiceType`
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ServiceProxying/GenerateProxyArgs.cs` is the immutable transfer record:
+
+```csharp
+public class GenerateProxyArgs
+{
+    [NotNull] public string CommandName { get; }
+    [NotNull] public string WorkDirectory { get; }
+    public string Module { get; }
+    public string Url { get; }
+    public string Output { get; }
+    public string Target { get; }
+    public string ApiName { get; }
+    public string Source { get; }
+    public string Folder { get; }
+    public string EntryPoint { get; }
+    public ServiceType? ServiceType { get; }
+    public bool WithoutContracts { get; }
+    [NotNull] public Dictionary<string, string> ExtraProperties { get; set; }
+    // ...constructor performs Check.NotNullOrWhiteSpace on CommandName/WorkDirectory
+}
+```
+
+`ServiceType` is a three-value enum in `Volo.Abp.Cli.ServiceProxying/ServiceType.cs`:
+
+```csharp
+public enum ServiceType : byte
+{
+    All = 0,
+    Application = 1,
+    Integration  = 2
+}
+```
+
+The generator can filter controllers by type. Application services produce a public HTTP API; integration services are for service-to-service traffic with stricter contract semantics. The base class shows how the filter is applied (see [next section](#serviceproxygeneratorbase-and-the-api-definition-endpoint)).
+
+## `IServiceProxyGenerator` and the registry
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ServiceProxying/IServiceProxyGenerator.cs` is a one-method interface:
+
+```csharp
+public interface IServiceProxyGenerator
+{
+    Task GenerateProxyAsync(GenerateProxyArgs args);
+}
+```
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ServiceProxying/AbpCliServiceProxyOptions.cs` carries the registry:
+
+```csharp
+public class AbpCliServiceProxyOptions
+{
+    public IDictionary<string, Type> Generators { get; }
+
+    public AbpCliServiceProxyOptions()
+    {
+        Generators = new Dictionary<string, Type>();
+    }
+}
+```
+
+`AbpCliCoreModule.ConfigureServices` populates it with the three shipping generators:
+
+```csharp
+Configure<AbpCliServiceProxyOptions>(options =>
+{
+    options.Generators[JavaScriptServiceProxyGenerator.Name] = typeof(JavaScriptServiceProxyGenerator);
+    options.Generators[AngularServiceProxyGenerator.Name]    = typeof(AngularServiceProxyGenerator);
+    options.Generators[CSharpServiceProxyGenerator.Name]     = typeof(CSharpServiceProxyGenerator);
+});
+```
+
+The `Name` constants are `"JS"`, `"NG"`, and `"CSHARP"` respectively. Adding a fourth language is therefore a one-line `options.Generators["KT"] = typeof(KotlinServiceProxyGenerator);` in a downstream module — no fork required.
+
+## `ServiceProxyGeneratorBase\<T\>` and the api-definition endpoint
+
+The three concrete generators all inherit from `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ServiceProxying/ServiceProxyGeneratorBase.cs`, which handles the shared concern: fetching the `ApplicationApiDescriptionModel` from the target server.
+
+```csharp
+public abstract class ServiceProxyGeneratorBase<T> : IServiceProxyGenerator where T : IServiceProxyGenerator
+{
+    public IJsonSerializer JsonSerializer { get; }
+    public CliHttpClientFactory CliHttpClientFactory { get; }
+    public ILogger<T> Logger { get; set; }
+
+    public abstract Task GenerateProxyAsync(GenerateProxyArgs args);
+
+    protected virtual async Task<ApplicationApiDescriptionModel> GetApplicationApiDescriptionModelAsync(
+        GenerateProxyArgs args,
+        ApplicationApiDescriptionModelRequestDto requestDto = null)
+    {
+        Check.NotNull(args.Url, nameof(args.Url));
+
+        var client = CliHttpClientFactory.CreateClient(needsAuthentication: false);
+
+        var apiDefinitionResult = await client.GetStringAsync(
+            CliUrls.GetApiDefinitionUrl(args.Url, requestDto));
+        var apiDefinition = JsonSerializer.Deserialize<ApplicationApiDescriptionModel>(apiDefinitionResult);
+
+        var moduleDefinition = apiDefinition.Modules
+            .FirstOrDefault(x => string.Equals(x.Key, args.Module, StringComparison.CurrentCultureIgnoreCase))
+            .Value;
+        if (moduleDefinition == null)
+        {
+            throw new CliUsageException($"Module name: {args.Module} is invalid");
+        }
+
+        var serviceType = GetServiceType(args);
+        switch (serviceType)
+        {
+            case ServiceType.Application:
+                moduleDefinition.Controllers.RemoveAll(x => x.Value.IsIntegrationService);
+                break;
+            case ServiceType.Integration:
+                moduleDefinition.Controllers.RemoveAll(x => !x.Value.IsIntegrationService);
+                break;
+        }
+
+        var apiDescriptionModel = ApplicationApiDescriptionModel.Create();
+        apiDescriptionModel.Types = apiDefinition.Types;
+        apiDescriptionModel.AddModule(moduleDefinition);
+        return apiDescriptionModel;
+    }
+
+    protected virtual ServiceType? GetServiceType(GenerateProxyArgs args)
+    {
+        return args.ServiceType ?? GetDefaultServiceType(args);
+    }
+
+    protected abstract ServiceType? GetDefaultServiceType(GenerateProxyArgs args);
+}
+```
+
+The endpoint URL is built by `CliUrls.GetApiDefinitionUrl(url, model)`:
+
+```csharp
+public static string GetApiDefinitionUrl(string url, ApplicationApiDescriptionModelRequestDto model = null)
+{
+    url = url.EnsureEndsWith('/');
+    return $"{url}api/abp/api-definition{(model != null
+        ? model.IncludeTypes ? "?includeTypes=true" : string.Empty
+        : string.Empty)}";
+}
+```
+
+So `abp generate-proxy -u https://localhost:44302/` ends up calling `https://localhost:44302/api/abp/api-definition`. Every ABP host application exposes this endpoint via `AbpApiDefinitionController`. The CLI is therefore decoupled from the server's actual code — it consumes the same metadata model that runtime UI components consume.
+
+`CliHttpClientFactory.CreateClient(needsAuthentication: false)` is the shared HTTP factory documented in [/cli/cli-core-abstractions](/cli/cli-core-abstractions). The proxy generators do not authenticate because `api/abp/api-definition` is intentionally anonymous.
+
+## `CSharpServiceProxyGenerator`
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ServiceProxying/CSharp/CSharpServiceProxyGenerator.cs` produces three kinds of file: a partial *class* file per controller, an empty *user* partial for the same class, and a JSON snapshot of the api-definition response. All three end up under the folder named by `--folder` (default `ClientProxies`).
+
+Its constants drive a template-replacement string-builder approach:
+
+```csharp
+public class CSharpServiceProxyGenerator : ServiceProxyGeneratorBase<CSharpServiceProxyGenerator>, ITransientDependency
+{
+    public const string Name = "CSHARP";
+
+    private const string ProxyDirectory = "ClientProxies";
+
+    private static readonly string[] ServicePostfixes = {
+        "AppService", "ApplicationService", "IntService", "IntegrationService", "Service"
+    };
+    private const string AppServicePrefix = "Volo.Abp.Application.Services";
+
+    private const string NamespacePlaceholder        = "<namespace>";
+    private const string UsingPlaceholder            = "<using>";
+    private const string MethodPlaceholder           = "<method>";
+    private const string PropertyPlaceholder         = "<property>";
+    private const string ClassNamePlaceholder        = "<className>";
+    private const string ServiceInterfacePlaceholder = "<serviceInterface>";
+    private const string DtoClassNamePlaceholder     = "<dtoName>";
+
+    private static readonly string ClassTemplate =
+        "// This file is automatically generated by ABP framework to use MVC Controllers from CSharp" +
+        $"{Environment.NewLine}<using>" +
+        $"{Environment.NewLine}" +
+        $"{Environment.NewLine}// ReSharper disable once CheckNamespace" +
+        $"{Environment.NewLine}namespace <namespace>;" +
+        $"{Environment.NewLine}" +
+        $"{Environment.NewLine}[Dependency(ReplaceServices = true)]" +
+        $"{Environment.NewLine}[ExposeServices(typeof(<serviceInterface>), typeof(<className>))]" +
+        $"{Environment.NewLine}[IntegrationService]" +
+        $"{Environment.NewLine}public partial class <className> : ClientProxyBase<<serviceInterface>>, <serviceInterface>" +
+        // ...
+        $"{Environment.NewLine}";
+}
+```
+
+The interesting flow is in `GenerateProxyAsync`:
+
+```csharp
+public override async Task GenerateProxyAsync(GenerateProxyArgs args)
+{
+    CheckWorkDirectory(args.WorkDirectory);
+    CheckFolder(args.Folder);
+
+    if (args.CommandName == RemoveProxyCommand.Name)
+    {
+        var folder = args.Folder.IsNullOrWhiteSpace() ? ProxyDirectory : args.Folder;
+        var folderPath = Path.Combine(args.WorkDirectory, folder);
+
+        if (Directory.Exists(folderPath))
+        {
+            Directory.Delete(folderPath, true);
+        }
+
+        Logger.LogInformation($"Delete {GetLoggerOutputPath(folderPath, args.WorkDirectory)}");
+        return;
+    }
+
+    var applicationApiDescriptionModel = await GetApplicationApiDescriptionModelAsync(args,
+        new ApplicationApiDescriptionModelRequestDto
+        {
+            IncludeTypes = !args.WithoutContracts
+        });
+
+    foreach (var controller in applicationApiDescriptionModel.Modules.Values
+                 .SelectMany(x => x.Controllers)
+                 .Where(x => x.Value.Interfaces.Any() &&
+                             ServicePostfixes.Any(s => x.Value.Interfaces.Last().Type.EndsWith(s))))
+    {
+        await GenerateClassFileAsync(args, controller.Value);
+    }
+
+    if (!args.WithoutContracts)
+    {
+        await GenerateDtoFileAsync(args, applicationApiDescriptionModel);
+    }
+
+    await CreateJsonFile(args, applicationApiDescriptionModel);
+}
+```
+
+The `--without-contracts` flag drops both the request for type information (`IncludeTypes=false`) and the `GenerateDtoFileAsync` step. This is the recommended mode when the consuming project already has a reference to the server's `*.Contracts` assembly — the generated client proxies will reuse those types instead of duplicating them.
+
+`GetDefaultServiceType` returns `ServiceType.All` so a single `abp generate-proxy -t csharp -url ...` covers both application and integration services. The integration-service marker survives into the emitted class via `[IntegrationService]`.
+
+`CreateJsonFile` writes `{folder}/{module}-generate-proxy.json`. This is the embeddable snapshot used by `MakeProxyJsonFileEmbeddedStep` in the project-building pipeline and consumed at runtime by `ClientProxyBase` to know which HTTP method/route corresponds to each interface method without making an additional `api/abp/api-definition` round-trip.
+
+### `ClientProxyBase\<T\>` — the runtime counterpart
+
+The class template emits classes derived from `ClientProxyBase\<T\>` (in `Volo.Abp.Http.Client.ClientProxying`). That base class consumes the embedded JSON snapshot at runtime: when the proxy method is called, the base looks up the route and HTTP method for the interface method name from the JSON, constructs the HTTP request, and deserialises the response. This is why the generator emits a separate `*-generate-proxy.json` file alongside the C# files.
+
+## `JavaScriptServiceProxyGenerator`
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ServiceProxying/JavaScript/JavaScriptServiceProxyGenerator.cs` does *not* roll its own code-generation. It delegates to `JQueryProxyScriptGenerator` (from `Volo.Abp.Http.ProxyScripting.Generators.JQuery`), which is the same generator the ABP runtime serves at `/Abp/ServiceProxyScript`. The CLI just captures the output to a file:
+
+```csharp
+public class JavaScriptServiceProxyGenerator
+    : ServiceProxyGeneratorBase<JavaScriptServiceProxyGenerator>, ITransientDependency
+{
+    public const string Name = "JS";
+    private const string EventTriggerScript = "abp.event.trigger('abp.serviceProxyScriptInitialized');";
+    private const string DefaultOutput = "wwwroot/client-proxies";
+
+    private readonly JQueryProxyScriptGenerator _jQueryProxyScriptGenerator;
+
+    public async override Task GenerateProxyAsync(GenerateProxyArgs args)
+    {
+        CheckWorkDirectory(args.WorkDirectory);
+
+        var output = Path.Combine(args.WorkDirectory, DefaultOutput, $"{args.Module}-proxy.js");
+        if (!args.Output.IsNullOrWhiteSpace())
+        {
+            output = args.Output.EndsWith(".js")
+                ? Path.Combine(args.WorkDirectory, args.Output)
+                : Path.Combine(args.WorkDirectory, Path.GetDirectoryName(args.Output),
+                    $"{args.Module}-proxy.js");
+        }
+
+        if (args.CommandName == RemoveProxyCommand.Name)
+        {
+            RemoveProxy(args, output);
+            return;
+        }
+
+        var applicationApiDescriptionModel = await GetApplicationApiDescriptionModelAsync(args);
+        var script = RemoveInitializedEventTrigger(
+            _jQueryProxyScriptGenerator.CreateScript(applicationApiDescriptionModel));
+
+        Directory.CreateDirectory(Path.GetDirectoryName(output));
+
+        using (var writer = new StreamWriter(output))
+        {
+            await writer.WriteAsync(script);
+        }
+
+        Logger.LogInformation($"Create {GetLoggerOutputPath(output, args.WorkDirectory)}");
+    }
+
+    protected override ServiceType? GetDefaultServiceType(GenerateProxyArgs args)
+    {
+        return ServiceType.Application;
+    }
+}
+```
+
+`RemoveInitializedEventTrigger` strips the `abp.event.trigger('abp.serviceProxyScriptInitialized');` line — that line is only needed when the script is served live by the runtime endpoint; pre-generated proxies do not need it.
+
+`CheckWorkDirectory` requires a `.csproj` in the working directory — the generator is meant to be run from inside the ASP.NET Core project. The default output is `wwwroot/client-proxies/{module}-proxy.js`, which the MVC bundling system (see [/ui-mvc/bundling](/ui-mvc/bundling)) can then pick up.
+
+The remove flow is symmetric — it just `File.Delete`s the same path:
+
+```csharp
+private void RemoveProxy(GenerateProxyArgs args, string filePath)
+{
+    if (File.Exists(filePath))
+    {
+        File.Delete(filePath);
+    }
+    Logger.LogInformation($"Delete {GetLoggerOutputPath(filePath, args.WorkDirectory)}");
+}
+```
+
+## `AngularServiceProxyGenerator`
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ServiceProxying/Angular/AngularServiceProxyGenerator.cs` is the most unusual implementation: it does *not* write files itself at all. Instead it shells out to `npx ng g @abp/ng.schematics:proxy-add` (or `proxy-remove`). The CLI is essentially a polite frontend for the Angular schematics:
+
+```csharp
+public class AngularServiceProxyGenerator
+    : ServiceProxyGeneratorBase<AngularServiceProxyGenerator>, ITransientDependency
+{
+    public const string Name = "NG";
+
+    public async override Task GenerateProxyAsync(GenerateProxyArgs args)
+    {
+        CheckAngularJsonFile();
+        await CheckNgSchematicsAsync();
+
+        var schematicsCommandName = args.CommandName == RemoveProxyCommand.Name
+            ? "proxy-remove" : "proxy-add";
+        var prompt = args.ExtraProperties.ContainsKey("p") || args.ExtraProperties.ContainsKey("prompt");
+        var defaultValue = prompt ? null : "__default";
+
+        var module     = defaultValue;
+        if (args.ExtraProperties.ContainsKey("t") || args.ExtraProperties.ContainsKey("module"))
+        {
+            module = args.Module;
+        }
+
+        var apiName    = args.ApiName ?? defaultValue;
+        var source     = args.Source  ?? defaultValue;
+        var target     = args.Target  ?? defaultValue;
+        var url        = args.Url     ?? defaultValue;
+        var entryPoint = args.EntryPoint ?? defaultValue;
+
+        var commandBuilder = new StringBuilder("npx ng g @abp/ng.schematics:" + schematicsCommandName);
+
+        if (module != null)     commandBuilder.Append($" --module {module}");
+        if (apiName != null)    commandBuilder.Append($" --api-name {apiName}");
+        if (source != null)     commandBuilder.Append($" --source {source}");
+        if (target != null)     commandBuilder.Append($" --target {target}");
+        if (url != null)        commandBuilder.Append($" --url {url}");
+        if (entryPoint != null) commandBuilder.Append($" --entry-point {entryPoint}");
+
+        var serviceType = GetServiceType(args) ?? Volo.Abp.Cli.ServiceProxying.ServiceType.Application;
+        commandBuilder.Append($" --service-type {serviceType.ToString().ToLower()}");
+
+        _cmdhelper.RunCmd(commandBuilder.ToString());
+    }
+}
+```
+
+The `__default` sentinel value is interesting: when the user does not pass `--prompt`, the CLI fills missing options with the literal string `__default`, which the schematic recognises and resolves from `angular.json`/`environment.ts`. With `--prompt`, the values are left `null` so the schematic falls back to its own interactive prompts.
+
+### Pre-flight checks
+
+Before delegating, the Angular generator validates two preconditions: the `angular.json` file exists and the `@abp/ng.schematics` dev dependency is installed at a compatible version.
+
+```csharp
+private async Task CheckNgSchematicsAsync()
+{
+    var packageJsonPath = $"package.json";
+
+    if (!File.Exists(packageJsonPath))
+    {
+        throw new CliUsageException("package.json file not found");
+    }
+
+    var schematicsVersion = (string)JObject.Parse(File.ReadAllText(packageJsonPath))
+        ["devDependencies"]?["@abp/ng.schematics"];
+
+    if (schematicsVersion == null)
+    {
+        throw new CliUsageException(
+            "\"@abp/ng.schematics\" NPM package should be installed to the devDependencies before running this command!");
+    }
+
+    var parsed = SemanticVersion.TryParse(schematicsVersion.TrimStart('~', '^', 'v'),
+        out var semanticSchematicsVersion);
+    if (!parsed)
+    {
+        Logger.LogWarning("Couldn't determinate version of \"@abp/ng.schematics\" package.");
+        return;
+    }
+
+    var cliVersion = await _cliVersionService.GetCurrentCliVersionAsync();
+    if (semanticSchematicsVersion < cliVersion)
+    {
+        Logger.LogWarning("\"@abp/ng.schematics\" version is lower than ABP Cli version.");
+    }
+}
+
+private static void CheckAngularJsonFile()
+{
+    var angularPath = $"angular.json";
+    if (!File.Exists(angularPath))
+    {
+        throw new CliUsageException(
+            "angular.json file not found. You must run this command in the angular folder.");
+    }
+}
+```
+
+These pre-flight checks short-circuit before the user pays the cost of `npx`/`npm` startup. The schematics themselves are documented in [/angular/schematics-and-generators](/angular/schematics-and-generators).
+
+`GetDefaultServiceType` returns `ServiceType.Application` because Angular consumers rarely talk to integration services — those are server-to-server contracts.
+
+## How a single `abp generate-proxy` flows
+
+A typical invocation:
+
+```bash
+abp generate-proxy -t csharp -u https://localhost:44302/ -m identity --folder MyProxies
+```
+
+…proceeds as:
+
+1. `CliService.RunAsync` → `CommandSelector.Select` returns `typeof(GenerateProxyCommand)`.
+2. `GenerateProxyCommand.ExecuteAsync` (via `ProxyCommandBase.ExecuteAsync`) uppercases `csharp` to `CSHARP`, looks it up in `AbpCliServiceProxyOptions.Generators`, finds `typeof(CSharpServiceProxyGenerator)`.
+3. The scope resolves `CSharpServiceProxyGenerator`.
+4. `BuildArgs` packs the rest of the options into a `GenerateProxyArgs`.
+5. `CSharpServiceProxyGenerator.GenerateProxyAsync` validates the working directory and the folder name.
+6. The shared `GetApplicationApiDescriptionModelAsync` hits `https://localhost:44302/api/abp/api-definition?includeTypes=true` via `CliHttpClientFactory`, deserialises, filters to the `identity` module, and applies any `ServiceType` filter.
+7. The generator walks every controller whose last interface name ends with one of `ServicePostfixes`, calls `GenerateClassFileAsync` to emit `MyProxies/{Namespace}/{Controller}ClientProxy.cs` plus the empty user partial, then `GenerateDtoFileAsync` for the contract types.
+8. `CreateJsonFile` writes `MyProxies/identity-generate-proxy.json` so `ClientProxyBase` can route method calls at runtime.
+
+Switching `-t csharp` to `-t js` reaches `JavaScriptServiceProxyGenerator` instead and writes `wwwroot/client-proxies/identity-proxy.js`. Switching to `-t ng` reaches `AngularServiceProxyGenerator` which shells out to `npx ng g @abp/ng.schematics:proxy-add --module identity --url https://localhost:44302/ --service-type application`.
+
+## Where `RemoveProxyCommand` differs
+
+The flow is identical until the generator dispatches on `args.CommandName`. For the C# generator it is a recursive `Directory.Delete`; for JavaScript it is a `File.Delete`; for Angular it is `npx ng g @abp/ng.schematics:proxy-remove`. None of the implementations require an `-u` URL because nothing needs to be fetched — but `ProxyCommandBase` is the same for both verbs, so the option list is unchanged. Passing `-url` to `remove-proxy` is silently ignored.
+
+## Extending the registry
+
+A downstream module can add a fourth generator without forking by configuring `AbpCliServiceProxyOptions` from its own `AbpModule`:
+
+```csharp
+[DependsOn(typeof(AbpCliCoreModule))]
+public class MyKotlinCliModule : AbpModule
+{
+    public override void ConfigureServices(ServiceConfigurationContext context)
+    {
+        Configure<AbpCliServiceProxyOptions>(options =>
+        {
+            options.Generators["KT"] = typeof(KotlinServiceProxyGenerator);
+        });
+    }
+}
+```
+
+…where `KotlinServiceProxyGenerator` derives from `ServiceProxyGeneratorBase\<KotlinServiceProxyGenerator\>` and registers with `[ITransientDependency]`. The dispatch base, the api-definition fetch, the service-type filter, and the dictionary lookup all keep working unchanged. This is why the `AbpCliServiceProxyOptions` is exposed at all — every concern that *could* differ between generators is on the generator class, not the dispatcher.
+
+## Caveats and quirks
+
+- `args.Url` is normalised by `CliUrls.GetApiDefinitionUrl` via `EnsureEndsWith('/')`. Passing `https://localhost:44302` and `https://localhost:44302/` both work; passing `https://localhost:44302/api/` does not — the suffix is fixed.
+- The C# generator filters controllers by the *last* interface name ending with one of `ServicePostfixes`. A service whose interface is named `IFoo` (no postfix) is silently skipped — by design, since ABP convention requires an `*AppService` or `*IntegrationService` suffix.
+- The Angular generator's `--prompt` flag suppresses default substitution, *not* the schematic's own interactive UI. The schematic itself prompts when needed.
+- The JS generator's `EventTriggerScript` removal exists because the runtime `JQueryProxyScriptGenerator` is the same generator used by `Volo.Abp.AspNetCore.Mvc.UI/Pages/Abp/ServiceProxyScript`; the line is meaningful when the script is fetched once at page load and meaningless when it is statically referenced.
+
+## Cross-references
+
+- The dispatch base every command shares: [/cli/command-selector](/cli/command-selector).
+- The `CliHttpClientFactory`, `CliUrls`, and `IJsonSerializer` plumbing: [/cli/cli-core-abstractions](/cli/cli-core-abstractions).
+- The Angular schematics the `NG` generator delegates to: [/angular/schematics-and-generators](/angular/schematics-and-generators).
+- The runtime bundling system that consumes the JS proxies: [/ui-mvc/bundling](/ui-mvc/bundling).
+- The high-level command index: [/cli/overview](/cli/overview).

@@ -1,0 +1,530 @@
+---
+title: "CMS Kit — Angular Admin Shell for Pages, Blogs, and Menus"
+sidebarTitle: "CMS Kit"
+description: "Angular @abp/ng.cms-kit package: admin pages for comments, tags, blogs, posts, menus, plus shared CodeMirror and Toast UI editors."
+---
+
+The `@abp/ng.cms-kit` package ships the Angular UI for the ABP Framework's CMS Kit module. It is structured as a thin admin shell (`@abp/ng.cms-kit/admin`), a paired admin-config entry (`@abp/ng.cms-kit/admin/config`), a placeholder public entry (`@abp/ng.cms-kit/public`), a generated proxy (`@abp/ng.cms-kit/proxy`), and a root bundle of shared editor components (`@abp/ng.cms-kit`). This page walks the file layout under `npm/ng-packs/packages/cms-kit/`, documents the ten replaceable routes registered by `createRoutes`, and explains how the CodeMirror + Toast UI editors plug into the dynamic form system.
+
+## Package layout
+
+The package is one of the largest in the repository because it ships ten administration screens, two embedded editors, and a settings tab. The split between `admin/` and `admin/config/` mirrors the [setting-management](/angular/setting-management) pattern — `admin/config` is the lightweight module that only registers the sidebar nodes and the settings tab; `admin` is the lazy-loadable UI itself.
+
+| Path | Symbol | Role |
+| --- | --- | --- |
+| `admin/src/cms-kit-admin.routes.ts` | `createRoutes` | Lazy `Routes` factory mounting every admin screen. |
+| `admin/src/components/comments/comment-list/comment-list.component.ts` | `CommentListComponent` | Paged comment moderation queue. |
+| `admin/src/components/comments/comment-details/comment-details.component.ts` | `CommentDetailsComponent` | Per-comment thread + approve/reject. |
+| `admin/src/components/tags/tag-list/tag-list.component.ts` | `TagListComponent` | Tag CRUD with entity-type definitions. |
+| `admin/src/components/tags/tag-modal/tag-modal.component.ts` | `TagModalComponent` | Inline tag editor. |
+| `admin/src/components/pages/page-list/page-list.component.ts` | `PageListComponent` | Page CRUD + "Set as Home" action. |
+| `admin/src/components/pages/page-form/page-form.component.ts` | `PageFormComponent` | Page create/edit using Toast UI editor. |
+| `admin/src/components/blogs/blog-list/blog-list.component.ts` | `BlogListComponent` | Blog CRUD + features modal. |
+| `admin/src/components/blogs/blog-modal/blog-modal.component.ts` | `BlogModalComponent` | Inline blog editor. |
+| `admin/src/components/blogs/blog-features-modal/blog-features-modal.component.ts` | `BlogFeaturesModalComponent` | Blog-scoped feature toggles. |
+| `admin/src/components/blog-posts/blog-post-list/blog-post-list.component.ts` | `BlogPostListComponent` | Paged blog-posts grid. |
+| `admin/src/components/blog-posts/blog-post-form/blog-post-form.component.ts` | `BlogPostFormComponent` | Post create/edit with Markdown editor. |
+| `admin/src/components/menus/menu-item-list/menu-item-list.component.ts` | `MenuItemListComponent` | Hierarchical menu editor. |
+| `admin/src/components/menus/menu-item-modal/menu-item-modal.component.ts` | `MenuItemModalComponent` | Menu item editor. |
+| `admin/src/components/global-resources/global-resources.component.ts` | `GlobalResourcesComponent` | Site-wide JS + CSS editors. |
+| `admin/src/components/cms-settings/cms-settings.component.ts` | `CmsSettingsComponent` | Comment-approval setting form. |
+| `admin/src/tokens/extensions.token.ts` | Five `InjectionToken`s | Per-component contributor hooks. |
+| `admin/src/resolvers/extensions.resolver.ts` | `cmsKitAdminExtensionsResolver` | Wires extensions during route activation. |
+| `admin/src/services/comment-entity.service.ts` | `CommentEntityService` | Cached `requireApprovement` flag. |
+| `admin/src/services/page-form.service.ts` | `PageFormService` | Shared CRUD logic for page form. |
+| `admin/src/services/blog-post-form.service.ts` | `BlogPostFormService` | Shared CRUD logic for post form. |
+| `admin/config/src/providers/cms-kit-admin-config.provider.ts` | `provideCmsKitAdminConfig` | Bundles route + setting-tab providers. |
+| `admin/config/src/providers/route.provider.ts` | `configureRoutes` | Sidebar menu under the CMS group. |
+| `admin/config/src/providers/setting-tab.provider.ts` | `configureSettingTabs` | Contributes the CMS tab in setting-management. |
+| `admin/config/src/enums/route-names.ts` | `eCmsKitAdminRouteNames` | Localization keys for menu nodes. |
+| `admin/config/src/enums/policy-names.ts` | `eCmsKitAdminPolicyNames` | Aggregated CMS policy with `||` operators. |
+| `src/components/code-mirror-editor/code-mirror-editor.component.ts` | `CodeMirrorEditorComponent` | Standalone JS/CSS editor (CodeMirror 6). |
+| `src/components/toast-ui/toastui-editor.component.ts` | `ToastuiEditorComponent` | Markdown WYSIWYG editor (Toast UI). |
+| `src/utils/text.utils.ts`, `src/utils/form.utils.ts` | helpers | Form/text helpers. |
+| `public/src/lib/cms-kit-public.routes.ts` | `createRoutes` (stub) | Reserved entry for the public-facing CMS UI. |
+
+The `public/` and `public/config/` directories are scaffolded but intentionally empty — the public-facing CMS UI is the next planned ng-pack and is reserved here so consumers can already import the stable path.
+
+## Lazy admin routes
+
+`createRoutes()` mounts every admin screen behind `authGuard` + `permissionGuard`, with each leaf wrapped in `ReplaceableRouteContainerComponent` so any of them can be swapped via `eCmsKitAdminComponents.*`. The relevant excerpt covers the *Comments* and *Pages* branches:
+
+```ts admin/src/cms-kit-admin.routes.ts
+export function createRoutes(config: CmsKitAdminConfigOptions = {}): Routes {
+  return [
+    {
+      path: '',
+      component: RouterOutletComponent,
+      providers: provideCmsKitAdminContributors(config),
+      canActivate: [authGuard, permissionGuard],
+      children: [
+        {
+          path: 'comments',
+          component: ReplaceableRouteContainerComponent,
+          resolve: { extensions: cmsKitAdminExtensionsResolver },
+          data: {
+            requiredPolicy: 'CmsKit.Comments',
+            replaceableComponent: {
+              key: eCmsKitAdminComponents.CommentList,
+              defaultComponent: CommentListComponent,
+            },
+          },
+          title: 'CmsKit::Comments',
+        },
+        {
+          path: 'comments/:id',
+          component: ReplaceableRouteContainerComponent,
+          resolve: { extensions: cmsKitAdminExtensionsResolver },
+          data: {
+            requiredPolicy: 'CmsKit.Comments',
+            replaceableComponent: {
+              key: eCmsKitAdminComponents.CommentDetails,
+              defaultComponent: CommentDetailsComponent,
+            },
+          },
+          title: 'CmsKit::Comments',
+        },
+        // tags, pages, pages/create, pages/update/:id …
+      ],
+    },
+  ];
+}
+```
+
+The complete route map:
+
+| Path | Replaceable key | Required policy | Default component |
+| --- | --- | --- | --- |
+| `comments` | `eCmsKitAdminComponents.CommentList` | `CmsKit.Comments` | `CommentListComponent` |
+| `comments/:id` | `eCmsKitAdminComponents.CommentDetails` | `CmsKit.Comments` | `CommentDetailsComponent` |
+| `tags` | `eCmsKitAdminComponents.Tags` | `CmsKit.Tags` | `TagListComponent` |
+| `pages` | `eCmsKitAdminComponents.Pages` | `CmsKit.Pages` | `PageListComponent` |
+| `pages/create` | `eCmsKitAdminComponents.PageForm` | `CmsKit.Pages.Create` | `PageFormComponent` |
+| `pages/update/:id` | `eCmsKitAdminComponents.PageForm` | `CmsKit.Pages.Update` | `PageFormComponent` |
+| `blogs` | `eCmsKitAdminComponents.Blogs` | `CmsKit.Blogs` | `BlogListComponent` |
+| `blog-posts` | `eCmsKitAdminComponents.BlogPosts` | `CmsKit.BlogPosts` | `BlogPostListComponent` |
+| `blog-posts/create` | `eCmsKitAdminComponents.BlogPostForm` | `CmsKit.BlogPosts.Create` | `BlogPostFormComponent` |
+| `blog-posts/update/:id` | `eCmsKitAdminComponents.BlogPostForm` | `CmsKit.BlogPosts.Update` | `BlogPostFormComponent` |
+| `menus` | `eCmsKitAdminComponents.Menus` | `CmsKit.Menus` | `MenuItemListComponent` |
+| `global-resources` | (direct) | `CmsKit.GlobalResources` | `GlobalResourcesComponent` |
+
+`provideCmsKitAdminContributors(options)` mirrors the tenant-management pattern — it maps each section of `CmsKitAdminConfigOptions` to the matching `InjectionToken`:
+
+```ts admin/src/cms-kit-admin.routes.ts
+function provideCmsKitAdminContributors(options: CmsKitAdminConfigOptions = {}): Provider[] {
+  return [
+    { provide: CMS_KIT_ADMIN_ENTITY_ACTION_CONTRIBUTORS,   useValue: options.entityActionContributors },
+    { provide: CMS_KIT_ADMIN_ENTITY_PROP_CONTRIBUTORS,     useValue: options.entityPropContributors },
+    { provide: CMS_KIT_ADMIN_TOOLBAR_ACTION_CONTRIBUTORS,  useValue: options.toolbarActionContributors },
+    { provide: CMS_KIT_ADMIN_CREATE_FORM_PROP_CONTRIBUTORS, useValue: options.createFormPropContributors },
+    { provide: CMS_KIT_ADMIN_EDIT_FORM_PROP_CONTRIBUTORS,   useValue: options.editFormPropContributors },
+  ];
+}
+```
+
+## Replaceable component keys
+
+```ts admin/src/enums/components.ts
+export enum eCmsKitAdminComponents {
+  CommentList     = 'CmsKit.Admin.CommentList',
+  CommentDetails  = 'CmsKit.Admin.CommentDetails',
+  Tags            = 'CmsKit.Admin.Tags',
+  Pages           = 'CmsKit.Admin.Pages',
+  PageForm        = 'CmsKit.Admin.PageForm',
+  Blogs           = 'CmsKit.Admin.Blogs',
+  BlogPosts       = 'CmsKit.Admin.BlogPosts',
+  BlogPostForm    = 'CmsKit.Admin.BlogPostForm',
+  Menus           = 'CmsKit.Admin.Menus',
+  GlobalResources = 'CmsKit.Admin.GlobalResources',
+}
+```
+
+Each key is also referenced by the default extension contributors in `admin/src/defaults/` — table props, form props, entity actions, and toolbar actions are bundled per key so the resolver can merge them all in one pass.
+
+## Menu and policy registration
+
+The config sub-package bootstraps the sidebar nodes during `provideAppInitializer`. The aggregated *CMS* policy uses ABP's `||` operator so the parent node appears whenever *any* CMS policy is granted:
+
+```ts admin/config/src/enums/policy-names.ts
+export enum eCmsKitAdminPolicyNames {
+  Cms = 'CmsKit.Comments || CmsKit.Tags || CmsKit.Pages || CmsKit.Blogs || CmsKit.BlogPosts || CmsKit.Menus || CmsKit.GlobalResources',
+  Comments = 'CmsKit.Comments',
+  Tags = 'CmsKit.Tags',
+  Pages = 'CmsKit.Pages',
+  Blogs = 'CmsKit.Blogs',
+  BlogPosts = 'CmsKit.BlogPosts',
+  Menus = 'CmsKit.Menus',
+  GlobalResources = 'CmsKit.GlobalResources',
+}
+```
+
+`configureRoutes()` then adds one node per leaf (showing the *Blog Posts* and *Blogs* entries):
+
+```ts admin/config/src/providers/route.provider.ts
+routesService.add([
+  {
+    path: '/cms/blog-posts',
+    name: eCmsKitAdminRouteNames.BlogPosts,
+    parentName: eCmsKitAdminRouteNames.Cms,
+    order: 1,
+    layout: eLayoutType.application,
+    iconClass: 'fa fa-file-alt',
+    requiredPolicy: eCmsKitAdminPolicyNames.BlogPosts,
+  },
+  {
+    path: '/cms/blogs',
+    name: eCmsKitAdminRouteNames.Blogs,
+    parentName: eCmsKitAdminRouteNames.Cms,
+    order: 2,
+    layout: eLayoutType.application,
+    iconClass: 'fa fa-blog',
+    requiredPolicy: eCmsKitAdminPolicyNames.Blogs,
+  },
+  // comments, tags, pages, menus, global-resources …
+]);
+```
+
+## CMS settings tab
+
+The config sub-package also pushes a single tab into `SettingTabsService` (see [setting-management](/angular/setting-management) for the host shell). The tab toggles itself based on the `CmsKit.CommentEnable` feature flag — when comments are enabled the host setting is hidden because each blog manages its own setting:
+
+```ts admin/config/src/providers/setting-tab.provider.ts
+export const CMS_KIT_ADMIN_SETTING_TAB_PROVIDERS = [
+  provideAppInitializer(() => {
+    configureSettingTabs();
+  }),
+];
+
+export async function configureSettingTabs() {
+  const settingTabs = inject(SettingTabsService);
+  const configState = inject(ConfigStateService);
+  const tabsArray: ABP.Tab[] = [
+    {
+      name: eCmsKitAdminRouteNames.Cms,
+      order: 100,
+      requiredPolicy: eCmsKitAdminPolicyNames.Cms,
+      invisible: configState.getFeature('CmsKit.CommentEnable')?.toLowerCase() === 'true',
+      component: CmsSettingsComponent,
+    },
+  ];
+  settingTabs.add(tabsArray);
+}
+```
+
+`CmsSettingsComponent` itself just toggles a single `FormControl` against `CommentAdminService.updateCommentSettings(...)`:
+
+```ts admin/src/components/cms-settings/cms-settings.component.ts
+@Component({
+  selector: 'abp-cms-settings',
+  templateUrl: './cms-settings.component.html',
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [
+    NgbNav, NgbNavItem, NgbNavItemRole, NgbNavLink, NgbNavLinkBase,
+    NgbNavContent, NgbNavOutlet, LocalizationPipe, ButtonComponent, ReactiveFormsModule,
+  ],
+})
+export class CmsSettingsComponent {
+  readonly commentAdminService = inject(CommentAdminService);
+  readonly configState = inject(ConfigStateService);
+  readonly toaster = inject(ToasterService);
+
+  commentApprovalControl = new FormControl(false);
+
+  ngOnInit() {
+    const isCommentApprovalEnabled =
+      this.configState.getSetting(CMS_KIT_COMMENTS_REQUIRE_APPROVEMENT).toLowerCase() === 'true';
+    this.commentApprovalControl.setValue(isCommentApprovalEnabled);
+  }
+}
+```
+
+## Standard CRUD pattern
+
+Every admin list component follows the same recipe — `ListService<XxxInput>` + `ExtensibleTableComponent` + `EXTENSIONS_IDENTIFIER`. `PageListComponent` is a representative example:
+
+```ts admin/src/components/pages/page-list/page-list.component.ts
+@Component({
+  selector: 'abp-page-list',
+  templateUrl: './page-list.component.html',
+  providers: [
+    ListService,
+    { provide: EXTENSIONS_IDENTIFIER, useValue: eCmsKitAdminComponents.Pages },
+  ],
+  imports: [ExtensibleTableComponent, PageComponent, LocalizationPipe, FormsModule, CommonModule],
+})
+export class PageListComponent implements OnInit {
+  data: PagedResultDto<PageDto> = { items: [], totalCount: 0 };
+
+  public readonly list = inject(ListService<GetPagesInputDto>);
+  private pageService = inject(PageAdminService);
+
+  filter = '';
+
+  private hookToQuery() {
+    this.list
+      .hookToQuery(query => {
+        const filters: Partial<GetPagesInputDto> = {};
+        if (this.list.filter) filters.filter = this.list.filter;
+        const input: GetPagesInputDto = { ...query, ...filters };
+        return this.pageService.getList(input);
+      })
+      .subscribe(res => { this.data = res; });
+  }
+
+  setAsHomePage(id: string, isHomePage: boolean) {
+    this.pageService.setAsHomePage(id).subscribe(() => {
+      this.list.get();
+      if (isHomePage) this.toasterService.warn('CmsKit::RemovedSettingAsHomePage');
+      else this.toasterService.success('CmsKit::CompletedSettingAsHomePage');
+    });
+  }
+}
+```
+
+`BlogListComponent` adds a second modal — `BlogFeaturesModalComponent` — that is rendered through `EXTENSIONS_IDENTIFIER = eCmsKitAdminComponents.Blogs`:
+
+```ts admin/src/components/blogs/blog-list/blog-list.component.ts
+@Component({
+  selector: 'abp-blog-list',
+  providers: [
+    ListService,
+    { provide: EXTENSIONS_IDENTIFIER, useValue: eCmsKitAdminComponents.Blogs },
+  ],
+  imports: [
+    ExtensibleTableComponent, PageComponent, LocalizationPipe, FormsModule, CommonModule,
+    BlogModalComponent, BlogFeaturesModalComponent,
+  ],
+})
+export class BlogListComponent implements OnInit {
+  filter = '';
+  isModalVisible = false;
+  selected?: BlogDto;
+  isFeaturesModalVisible = false;
+  selectedBlogId?: string;
+}
+```
+
+## Comments
+
+The comments page combines a paged grid with a reactive filter form (date range, author, entity type, approve state). `CommentEntityService` caches the *require-approval* setting so the toolbar can render an extra "Approve" action conditionally:
+
+```ts admin/src/components/comments/comment-list/comment-list.component.ts
+@Component({
+  selector: 'abp-comment-list',
+  providers: [
+    ListService,
+    { provide: EXTENSIONS_IDENTIFIER, useValue: eCmsKitAdminComponents.CommentList },
+  ],
+  viewProviders: [
+    { provide: NgbDateAdapter, useClass: DateTimeAdapter },
+  ],
+  imports: [
+    ExtensibleModule, PageModule, ReactiveFormsModule, NgbDatepickerModule,
+    CommonModule, LocalizationPipe, FormInputComponent, ButtonComponent,
+  ],
+})
+export class CommentListComponent implements OnInit {
+  readonly list = inject(ListService<CommentGetListInput>);
+  readonly commentEntityService = inject(CommentEntityService);
+
+  filterForm!: FormGroup;
+  commentApproveStateOptions = commentApproveStateOptions;
+  requireApprovement: boolean;
+}
+```
+
+The `commentApproveStateOptions` constant ships in the proxy as a `NameValue<CommentApproveState>[]`, so the filter dropdown is generated automatically — no hand-mapping enums to labels.
+
+## Global resources
+
+`GlobalResourcesComponent` embeds a tabbed `<ngb-nav>` with two `CodeMirrorEditorComponent` instances — one for the global `<script>` and one for the global `<style>` block. Updates are saved as a single DTO so a partial save can never leave the site in a broken state:
+
+```ts admin/src/components/global-resources/global-resources.component.ts
+@Component({
+  selector: 'abp-global-resources',
+  imports: [
+    CommonModule, ReactiveFormsModule, NgxValidateCoreModule, NgbNavModule,
+    CodeMirrorEditorComponent, LocalizationPipe, PageComponent, ButtonComponent,
+  ],
+  templateUrl: './global-resources.component.html',
+})
+export class GlobalResourcesComponent implements OnInit {
+  private globalResourceService = inject(GlobalResourceAdminService);
+  form: FormGroup;
+  activeTab: string = 'script';
+
+  private buildForm() {
+    this.form = new FormGroup({
+      script: new FormControl(''),
+      style: new FormControl(''),
+    });
+  }
+}
+```
+
+## Shared editors
+
+The package root `src/components/` contains two `ControlValueAccessor` editors that are reused across the admin pages.
+
+### CodeMirror editor
+
+`CodeMirrorEditorComponent` (`src/components/code-mirror-editor/code-mirror-editor.component.ts`) is a thin wrapper around CodeMirror 6's `EditorView`. It implements `ControlValueAccessor` so it slots into reactive forms transparently:
+
+```ts src/components/code-mirror-editor/code-mirror-editor.component.ts
+@Component({
+  selector: 'abp-codemirror-editor',
+  template: `<div #cmHost class="codemirror-container"></div>`,
+  providers: [
+    {
+      provide: NG_VALUE_ACCESSOR,
+      useExisting: forwardRef(() => CodeMirrorEditorComponent),
+      multi: true,
+    },
+  ],
+})
+export class CodeMirrorEditorComponent implements AfterViewInit, ControlValueAccessor {
+  @ViewChild('cmHost', { static: true })
+  host!: ElementRef;
+
+  private view!: EditorView;
+  private value = '';
+
+  writeValue(value: string): void {
+    this.value = value || '';
+    if (this.view) {
+      this.view.dispatch({
+        changes: { from: 0, to: this.view.state.doc.length, insert: this.value },
+      });
+    }
+  }
+}
+```
+
+`basicSetup` from `codemirror` provides line numbers, syntax highlighting, and the gutter — enough for editing site-wide JS/CSS without pulling in a full IDE.
+
+### Toast UI editor
+
+`ToastuiEditorComponent` (`src/components/toast-ui/toastui-editor.component.ts`) is the Markdown WYSIWYG editor used by the *Pages* and *Blog Posts* forms. It listens to the theme via `THEME_CHANGE_TOKEN` from `@abp/ng.theme.shared` so dark mode is honoured, and persists the chosen view mode (`markdown` vs `wysiwyg`) through `AbpLocalStorageService`:
+
+```ts src/components/toast-ui/toastui-editor.component.ts
+@Component({
+  selector: 'abp-toastui-editor',
+  template: `<div #editorContainer></div>`,
+  providers: [
+    {
+      provide: NG_VALUE_ACCESSOR,
+      useExisting: forwardRef(() => ToastuiEditorComponent),
+      multi: true,
+    },
+  ],
+})
+export class ToastuiEditorComponent implements AfterViewInit, ControlValueAccessor {
+  @ViewChild('editorContainer', { static: true })
+  editorContainer!: ElementRef<HTMLDivElement>;
+
+  private editor!: Editor;
+  private platformId = inject(PLATFORM_ID);
+  private localStorageService = inject(AbpLocalStorageService);
+  private themeChange$ = inject(THEME_CHANGE_TOKEN, { optional: true });
+
+  writeValue(value: string): void {
+    this.value = value || '';
+    if (this.editor) this.editor.setMarkdown(this.value);
+  }
+}
+```
+
+The `isPlatformBrowser` check is critical — Toast UI directly touches `window` and would crash an SSR render otherwise (see [dev-app](/angular/dev-app) for the SSR setup).
+
+## Extension contributor tokens
+
+The five contributor tokens look identical to the tenant-management set but each holds a `Partial<Record<eCmsKitAdminComponents, …>>` so a single contributor bundle can target multiple screens at once:
+
+```ts admin/src/tokens/extensions.token.ts
+export const CMS_KIT_ADMIN_ENTITY_ACTION_CONTRIBUTORS =
+  new InjectionToken<EntityActionContributors>('CMS_KIT_ADMIN_ENTITY_ACTION_CONTRIBUTORS');
+export const CMS_KIT_ADMIN_ENTITY_PROP_CONTRIBUTORS =
+  new InjectionToken<EntityPropContributors>('CMS_KIT_ADMIN_ENTITY_PROP_CONTRIBUTORS');
+export const CMS_KIT_ADMIN_TOOLBAR_ACTION_CONTRIBUTORS =
+  new InjectionToken<ToolbarActionContributors>('CMS_KIT_ADMIN_TOOLBAR_ACTION_CONTRIBUTORS');
+export const CMS_KIT_ADMIN_CREATE_FORM_PROP_CONTRIBUTORS =
+  new InjectionToken<CreateFormPropContributors>('CMS_KIT_ADMIN_CREATE_FORM_PROP_CONTRIBUTORS');
+export const CMS_KIT_ADMIN_EDIT_FORM_PROP_CONTRIBUTORS =
+  new InjectionToken<EditFormPropContributors>('CMS_KIT_ADMIN_EDIT_FORM_PROP_CONTRIBUTORS');
+```
+
+The default-prop maps wire each screen to its prop set:
+
+```ts admin/src/tokens/extensions.token.ts
+export const DEFAULT_CMS_KIT_ADMIN_ENTITY_PROPS = {
+  [eCmsKitAdminComponents.CommentList]: DEFAULT_COMMENT_ENTITY_PROPS,
+  [eCmsKitAdminComponents.CommentDetails]: DEFAULT_COMMENT_ENTITY_PROPS,
+  [eCmsKitAdminComponents.Tags]: DEFAULT_TAG_ENTITY_PROPS,
+  [eCmsKitAdminComponents.Pages]: DEFAULT_PAGE_ENTITY_PROPS,
+  [eCmsKitAdminComponents.Blogs]: DEFAULT_BLOG_ENTITY_PROPS,
+  [eCmsKitAdminComponents.BlogPosts]: DEFAULT_BLOG_POST_ENTITY_PROPS,
+};
+```
+
+Note that the *Comment List* and *Comment Details* screens share the same default prop set — a single contributor bundle keyed on either key automatically applies to both.
+
+## Architecture sketch
+
+```mermaid
+flowchart TD
+  subgraph Sidecar
+    Cfg[admin/config/src]
+    Cfg -->|registers menu nodes| Routes[RoutesService]
+    Cfg -->|registers settings tab| Tabs[SettingTabsService]
+  end
+
+  subgraph Lazy
+    AdmRoutes[admin/src/cms-kit-admin.routes.ts]
+    AdmRoutes -->|createRoutes()| Children
+    Children --> CommentList[CommentListComponent]
+    Children --> PageList[PageListComponent]
+    Children --> BlogList[BlogListComponent]
+    Children --> BlogPostList[BlogPostListComponent]
+    Children --> MenuList[MenuItemListComponent]
+    Children --> Global[GlobalResourcesComponent]
+  end
+
+  Resolver[cmsKitAdminExtensionsResolver] -->|mergeWithDefault*| Extensions[ExtensionsService]
+  Children -->|EXTENSIONS_IDENTIFIER| Extensions
+
+  Editors[CodeMirror + Toast UI] --> Global
+  Editors --> PageForm[PageFormComponent]
+  Editors --> PostForm[BlogPostFormComponent]
+```
+
+## Helper services
+
+Three services live under `admin/src/services/`:
+
+- `CommentEntityService` is `providedIn: 'root'` and caches the `CmsKit::CommentRequireApprovement` setting so list/details components do not each hit the config state.
+- `PageFormService` wraps `PageAdminService.create()` / `update()` and pushes the user back to `/cms/pages` after a successful save through `Router.navigate`.
+- `BlogPostFormService` is the analogous wrapper for blog posts, including the file-upload helper for the cover image.
+
+## REST surface
+
+The proxy is regenerated by `ng generate @abp/ng.schematics:proxy-refresh` and exposes the admin and public service families. Each service maps to a controller in `Volo.CmsKit.Admin.Web` / `Volo.CmsKit.Public.Web`. Sample symbols you will encounter:
+
+| Service | Routes |
+| --- | --- |
+| `BlogAdminService` | `/api/cms-kit-admin/blogs*` |
+| `BlogPostAdminService` | `/api/cms-kit-admin/blog-posts*` |
+| `CommentAdminService` | `/api/cms-kit-admin/comments*` |
+| `MenuItemAdminService` | `/api/cms-kit-admin/menu-items*` |
+| `PageAdminService` | `/api/cms-kit-admin/pages*` |
+| `TagAdminService` | `/api/cms-kit-admin/tags*` |
+| `GlobalResourceAdminService` | `/api/cms-kit-admin/global-resources` |
+
+Every service ships under `@abp/ng.cms-kit/proxy` so admin and public consumers share the same DTOs.
+
+## Related pages
+
+- [Setting management](/angular/setting-management) — host of the *CMS* settings tab.
+- [Tenant management](/angular/tenant-management) — uses the same `ExtensionsService` plumbing.
+- [Schematics & generators](/angular/schematics-and-generators) — `proxy-add` for the CMS Kit proxy.
+- Backend: [CMS Kit module](/modules/cms-kit).
+- Proxy plumbing: [Service proxying](/cli/service-proxying).

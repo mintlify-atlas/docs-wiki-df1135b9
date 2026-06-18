@@ -1,0 +1,345 @@
+---
+title: "Security Abstractions: Principal, Claims, Current User"
+sidebarTitle: "Security Abstractions"
+description: "Inside Volo.Abp.Security — ICurrentPrincipalAccessor, AbpClaimTypes, ICurrentUser, ICurrentClient, and the impersonation helpers that ABP exposes."
+---
+
+The `Volo.Abp.Security` NuGet package is the lowest layer of the ABP Framework security stack. It owns three responsibilities: exposing the active `ClaimsPrincipal` via `ICurrentPrincipalAccessor`, standardising claim type names through `AbpClaimTypes`, and projecting both into the friendlier `ICurrentUser` / `ICurrentClient` abstractions that every other layer (authorization, settings, auditing, multi-tenancy) consumes. This page walks through each type in `framework/src/Volo.Abp.Security/` and the extension methods that round them out.
+
+## Package layout
+
+The package's source tree is tight — every file referenced below lives under `framework/src/Volo.Abp.Security/Volo/Abp/`. The module `AbpSecurityModule.cs` only registers the encryption options and auto-wires `IAbpClaimsPrincipalContributor` / `IAbpDynamicClaimsPrincipalContributor` implementations into `AbpClaimsPrincipalFactoryOptions`.
+
+| Folder | Key types |
+| --- | --- |
+| `Security/Claims/` | `AbpClaimTypes`, `ICurrentPrincipalAccessor`, `CurrentPrincipalAccessorBase`, `ThreadCurrentPrincipalAccessor`, `AbpClaimsPrincipalFactory` |
+| `Users/` | `ICurrentUser`, `CurrentUser`, `CurrentUserExtensions` |
+| `Clients/` | `ICurrentClient`, `CurrentClient` |
+| `Roles/` | `AbpRoleConsts` |
+| `SecurityLog/` | `ISecurityLogManager`, `SecurityLogInfo` |
+| `Security/Encryption/` | `IStringEncryptionService`, `AbpStringEncryptionOptions` |
+
+## ICurrentPrincipalAccessor
+
+Almost every other layer in the framework reads the active principal through `ICurrentPrincipalAccessor` rather than touching `HttpContext.User` or `Thread.CurrentPrincipal` directly. The interface itself is tiny:
+
+```csharp
+// framework/src/Volo.Abp.Security/Volo/Abp/Security/Claims/ICurrentPrincipalAccessor.cs
+public interface ICurrentPrincipalAccessor
+{
+    ClaimsPrincipal Principal { get; }
+
+    IDisposable Change(ClaimsPrincipal principal);
+}
+```
+
+The `Change(...)` method is the linchpin of impersonation and background-job principal scoping. `CurrentPrincipalAccessorBase` in `framework/src/Volo.Abp.Security/Volo/Abp/Security/Claims/CurrentPrincipalAccessorBase.cs` implements it on top of an `AsyncLocal<ClaimsPrincipal>`:
+
+```csharp
+public ClaimsPrincipal Principal => _currentPrincipal.Value ?? GetClaimsPrincipal();
+
+private readonly AsyncLocal<ClaimsPrincipal> _currentPrincipal = new AsyncLocal<ClaimsPrincipal>();
+
+protected abstract ClaimsPrincipal GetClaimsPrincipal();
+
+public virtual IDisposable Change(ClaimsPrincipal principal)
+{
+    return SetCurrent(principal);
+}
+```
+
+`GetClaimsPrincipal()` is the fallback when no override is active. The framework ships two concrete subclasses:
+
+| Implementation | File | Used by |
+| --- | --- | --- |
+| `ThreadCurrentPrincipalAccessor` | `Volo/Abp/Security/Claims/ThreadCurrentPrincipalAccessor.cs` | Console, tests, generic hosts |
+| `HttpContextCurrentPrincipalAccessor` | `Volo.Abp.AspNetCore` | Web apps; reads `HttpContext.User` |
+
+In an ASP.NET Core process, the HTTP accessor wins by `[Dependency(ReplaceServices = true)]`. The thread-based one is the fallback singleton:
+
+```csharp
+// framework/src/Volo.Abp.Security/Volo/Abp/Security/Claims/ThreadCurrentPrincipalAccessor.cs
+public class ThreadCurrentPrincipalAccessor : CurrentPrincipalAccessorBase, ISingletonDependency
+{
+    protected override ClaimsPrincipal GetClaimsPrincipal()
+    {
+        return (Thread.CurrentPrincipal as ClaimsPrincipal)!;
+    }
+}
+```
+
+### Changing the principal in a scope
+
+`CurrentPrincipalAccessorExtensions` (in `Volo/Abp/Security/Claims/CurrentPrincipalAccessorExtensions.cs`) provides three convenience overloads so you don't have to build a `ClaimsPrincipal` by hand:
+
+```csharp
+public static IDisposable Change(this ICurrentPrincipalAccessor currentPrincipalAccessor, Claim claim);
+public static IDisposable Change(this ICurrentPrincipalAccessor currentPrincipalAccessor, IEnumerable<Claim> claims);
+public static IDisposable Change(this ICurrentPrincipalAccessor currentPrincipalAccessor, ClaimsIdentity claimsIdentity);
+```
+
+Pattern: take the `IDisposable` and `using` it — when the scope exits, the previous principal is restored via the captured `DisposeAction`.
+
+```csharp
+using (_principalAccessor.Change(new Claim(AbpClaimTypes.UserId, otherUserId.ToString())))
+{
+    await _someService.DoStuffAsync(); // runs as the impersonated user
+}
+```
+
+## AbpClaimTypes
+
+`framework/src/Volo.Abp.Security/Volo/Abp/Security/Claims/AbpClaimTypes.cs` is the single source of truth for the claim names ABP looks at. Everything is a mutable `static string` so an application can remap to the names used by an upstream identity provider in module configuration time — the comment in the file even acknowledges the idea of an options bag is on the roadmap.
+
+```csharp
+public static class AbpClaimTypes
+{
+    public static string UserName { get; set; } = ClaimTypes.Name;
+    public static string Name { get; set; } = ClaimTypes.GivenName;
+    public static string SurName { get; set; } = ClaimTypes.Surname;
+    public static string UserId { get; set; } = ClaimTypes.NameIdentifier;
+    public static string Role { get; set; } = ClaimTypes.Role;
+    public static string Email { get; set; } = ClaimTypes.Email;
+    public static string EmailVerified { get; set; } = "email_verified";
+    public static string PhoneNumber { get; set; } = "phone_number";
+    public static string PhoneNumberVerified { get; set; } = "phone_number_verified";
+    public static string TenantId { get; set; } = "tenantid";
+    public static string EditionId { get; set; } = "editionid";
+    public static string ClientId { get; set; } = "client_id";
+    public static string ImpersonatorTenantId { get; set; } = "impersonator_tenantid";
+    public static string ImpersonatorUserId { get; set; } = "impersonator_userid";
+    public static string ImpersonatorTenantName { get; set; } = "impersonator_tenantname";
+    public static string ImpersonatorUserName { get; set; } = "impersonator_username";
+    public static string Picture { get; set; } = "picture";
+    public static string RememberMe { get; set; } = "remember_me";
+    public static string SessionId { get; set; } = "session_id";
+}
+```
+
+### Default mapping table
+
+| ABP claim | Default value | Source |
+| --- | --- | --- |
+| `UserName` | `ClaimTypes.Name` | .NET system claim |
+| `Name` | `ClaimTypes.GivenName` | .NET system claim |
+| `SurName` | `ClaimTypes.Surname` | .NET system claim |
+| `UserId` | `ClaimTypes.NameIdentifier` | .NET system claim |
+| `Role` | `ClaimTypes.Role` | .NET system claim |
+| `Email` | `ClaimTypes.Email` | .NET system claim |
+| `TenantId` | `"tenantid"` | ABP custom |
+| `EditionId` | `"editionid"` | ABP custom |
+| `ClientId` | `"client_id"` | OIDC standard |
+| `SessionId` | `"session_id"` | ABP custom |
+
+<Note>
+If you front your app with a third-party OIDC provider that issues `sub` instead of `nameidentifier`, set `AbpClaimTypes.UserId = "sub";` from your module's `PreConfigureServices`. That single line propagates through the whole framework.
+</Note>
+
+## ICurrentUser
+
+`framework/src/Volo.Abp.Security/Volo/Abp/Users/ICurrentUser.cs` defines the shape every application service consumes:
+
+```csharp
+public interface ICurrentUser
+{
+    bool IsAuthenticated { get; }
+    Guid? Id { get; }
+    string? UserName { get; }
+    string? Name { get; }
+    string? SurName { get; }
+    string? PhoneNumber { get; }
+    bool PhoneNumberVerified { get; }
+    string? Email { get; }
+    bool EmailVerified { get; }
+    Guid? TenantId { get; }
+    string[] Roles { get; }
+
+    Claim? FindClaim(string claimType);
+    Claim[] FindClaims(string claimType);
+    Claim[] GetAllClaims();
+    bool IsInRole(string roleName);
+}
+```
+
+The default implementation in `framework/src/Volo.Abp.Security/Volo/Abp/Users/CurrentUser.cs` is a thin shim over `ICurrentPrincipalAccessor`:
+
+```csharp
+public class CurrentUser : ICurrentUser, ITransientDependency
+{
+    public virtual bool IsAuthenticated => Id.HasValue;
+    public virtual Guid? Id => _principalAccessor.Principal?.FindUserId();
+    public virtual string? UserName => this.FindClaimValue(AbpClaimTypes.UserName);
+    public virtual string? Email => this.FindClaimValue(AbpClaimTypes.Email);
+    public virtual Guid? TenantId => _principalAccessor.Principal?.FindTenantId();
+    public virtual string[] Roles =>
+        FindClaims(AbpClaimTypes.Role).Select(c => c.Value).Distinct().ToArray();
+    // ...
+}
+```
+
+Notice how `IsAuthenticated` is purely *did we resolve a UserId from the principal* — a bearer-only client-credentials token has `Id == null`, so `IsAuthenticated` is `false`. Use `ICurrentClient` for those scenarios. `FindUserId()` is the extension in `AbpClaimsIdentityExtensions` that parses the `AbpClaimTypes.UserId` claim as a `Guid?`.
+
+## CurrentUserExtensions
+
+The `FindClaim`/`FindClaims`/`GetAllClaims` API is intentionally minimal. The richer API lives in `framework/src/Volo.Abp.Security/Volo/Abp/Users/CurrentUserExtensions.cs`:
+
+```csharp
+public static string? FindClaimValue(this ICurrentUser currentUser, string claimType);
+public static T FindClaimValue<T>(this ICurrentUser currentUser, string claimType) where T : struct;
+
+public static Guid GetId(this ICurrentUser currentUser); // throws if Id is null
+
+public static Guid? FindImpersonatorTenantId(this ICurrentUser currentUser);
+public static Guid? FindImpersonatorUserId(this ICurrentUser currentUser);
+public static string? FindImpersonatorTenantName(this ICurrentUser currentUser);
+public static string? FindImpersonatorUserName(this ICurrentUser currentUser);
+
+public static string  GetSessionId(this ICurrentUser currentUser);  // asserts non-null
+public static string? FindSessionId(this ICurrentUser currentUser);
+```
+
+| Helper | Returns | Use case |
+| --- | --- | --- |
+| `GetId()` | `Guid` (throws) | Inside an `[Authorize]`-protected app service where `Id` is guaranteed |
+| `FindClaimValue<T>(name)` | `T` value type | Reading numeric/Guid/enum claims |
+| `FindImpersonatorUserId()` | `Guid?` | Audit logs that note "admin acted as user" |
+| `FindSessionId()` | `string?` | Server-side session invalidation flows |
+
+The impersonator helpers explicitly walk the `AbpClaimTypes.Impersonator*` claims that are set by ABP's impersonation feature (in the `account` module) — they look like:
+
+```csharp
+public static Guid? FindImpersonatorUserId(this ICurrentUser currentUser)
+{
+    var impersonatorUserId = currentUser.FindClaimValue(AbpClaimTypes.ImpersonatorUserId);
+    if (impersonatorUserId.IsNullOrWhiteSpace())
+    {
+        return null;
+    }
+    if (Guid.TryParse(impersonatorUserId, out var guid))
+    {
+        return guid;
+    }
+    return null;
+}
+```
+
+## ICurrentClient — the machine-to-machine path
+
+OAuth2 client-credentials tokens have no user. ABP models them with `ICurrentClient` in `framework/src/Volo.Abp.Security/Volo/Abp/Clients/ICurrentClient.cs` and the default reads the OIDC `client_id` claim:
+
+```csharp
+// framework/src/Volo.Abp.Security/Volo/Abp/Clients/CurrentClient.cs
+public class CurrentClient : ICurrentClient, ITransientDependency
+{
+    public virtual string? Id => _principalAccessor.Principal?.FindClientId();
+    public virtual bool IsAuthenticated => Id != null;
+
+    private readonly ICurrentPrincipalAccessor _principalAccessor;
+
+    public CurrentClient(ICurrentPrincipalAccessor principalAccessor)
+    {
+        _principalAccessor = principalAccessor;
+    }
+}
+```
+
+This is what `ClientPermissionValueProvider` (covered on the [Permissions](/security/permissions) page) uses to grant API scopes per client_id.
+
+## ClaimsIdentity helpers
+
+`framework/src/Volo.Abp.Security/System/Security/Principal/AbpClaimsIdentityExtensions.cs` adds a family of `Find*` methods so any `ClaimsPrincipal` / `ClaimsIdentity` can be probed without touching `AbpClaimTypes` directly:
+
+| Extension | Reads claim |
+| --- | --- |
+| `FindUserId()` | `AbpClaimTypes.UserId` parsed to `Guid?` |
+| `FindTenantId()` | `AbpClaimTypes.TenantId` parsed to `Guid?` |
+| `FindEditionId()` | `AbpClaimTypes.EditionId` parsed to `Guid?` |
+| `FindClientId()` | `AbpClaimTypes.ClientId` raw string |
+| `FindSessionId()` | `AbpClaimTypes.SessionId` raw string |
+
+These are the same helpers `CurrentUser` and `EditionFeatureValueProvider` use internally (see `framework/src/Volo.Abp.Features/Volo/Abp/Features/EditionFeatureValueProvider.cs`).
+
+## AbpClaimsPrincipalFactory
+
+When a host needs to *build* a `ClaimsPrincipal` (e.g. after a login or to project a remote token), it calls `IAbpClaimsPrincipalFactory`:
+
+```csharp
+// framework/src/Volo.Abp.Security/Volo/Abp/Security/Claims/IAbpClaimsPrincipalFactory.cs
+public interface IAbpClaimsPrincipalFactory
+{
+    Task<ClaimsPrincipal> CreateAsync(ClaimsPrincipal? existsClaimsPrincipal = null);
+    Task<ClaimsPrincipal> CreateDynamicAsync(ClaimsPrincipal? existsClaimsPrincipal = null);
+}
+```
+
+The default in `AbpClaimsPrincipalFactory.cs` iterates `AbpClaimsPrincipalFactoryOptions.Contributors` (registered `IAbpClaimsPrincipalContributor`s) for `CreateAsync` and `DynamicContributors` for `CreateDynamicAsync`. The auth type is the constant `"Abp.Application"`:
+
+```csharp
+public static string AuthenticationType => "Abp.Application";
+
+var claimsPrincipal = existsClaimsPrincipal ?? new ClaimsPrincipal(new ClaimsIdentity(
+    AuthenticationType,
+    AbpClaimTypes.UserName,
+    AbpClaimTypes.Role));
+```
+
+The dynamic flavour is covered separately on [Dynamic claims](/security/dynamic-claims) — it's how the Identity module re-projects fresh role/profile claims into a logged-in session without forcing a re-login.
+
+## Module wiring
+
+`AbpSecurityModule.PostConfigureServices` walks the DI container with `services.OnRegistered` and collects implementations of `IAbpClaimsPrincipalContributor` / `IAbpDynamicClaimsPrincipalContributor` into the options:
+
+```csharp
+// framework/src/Volo.Abp.Security/Volo/Abp/Security/AbpSecurityModule.cs
+private static void AutoAddClaimsPrincipalContributors(IServiceCollection services)
+{
+    var contributorTypes = new List<Type>();
+    var dynamicContributorTypes = new List<Type>();
+
+    services.OnRegistered(context =>
+    {
+        if (typeof(IAbpClaimsPrincipalContributor).IsAssignableFrom(context.ImplementationType))
+        {
+            contributorTypes.Add(context.ImplementationType);
+        }
+
+        if (typeof(IAbpDynamicClaimsPrincipalContributor).IsAssignableFrom(context.ImplementationType))
+        {
+            dynamicContributorTypes.Add(context.ImplementationType);
+        }
+    });
+
+    services.Configure<AbpClaimsPrincipalFactoryOptions>(options =>
+    {
+        options.Contributors.AddIfNotContains(contributorTypes);
+        options.DynamicContributors.AddIfNotContains(dynamicContributorTypes);
+    });
+}
+```
+
+This is the same `OnRegistered` discovery pattern used for permissions, features, and settings — described in the [stack overview](/security/overview).
+
+## When to use what
+
+<CardGroup cols={2}>
+  <Card title="ICurrentUser" icon="user">
+    Default choice in application services. Reads identity claims via the active principal.
+  </Card>
+  <Card title="ICurrentClient" icon="server">
+    Client-credentials flows where `ICurrentUser.IsAuthenticated` is `false` but `client_id` is present.
+  </Card>
+  <Card title="ICurrentPrincipalAccessor" icon="shield">
+    Low-level — needed when you want the raw `ClaimsPrincipal` or want to call `Change(...)` to impersonate.
+  </Card>
+  <Card title="IAbpClaimsPrincipalFactory" icon="industry">
+    Hosting/authentication code that needs to construct a fresh `ClaimsPrincipal` after sign-in.
+  </Card>
+</CardGroup>
+
+## Related reading
+
+- [Authorization](/security/authorization) — how `ICurrentPrincipalAccessor` feeds the authorization pipeline.
+- [Permissions](/security/permissions) — value providers that read `AbpClaimTypes.UserId`, `Role`, and `ClientId`.
+- [Dynamic claims](/security/dynamic-claims) — how `CreateDynamicAsync` keeps a logged-in session in sync.
+- [Identity module](/modules/identity) — the canonical contributor that populates user/role claims at login.
+- [JWT bearer auth](/aspnetcore/jwt-bearer-auth) — the upstream layer that hands a `ClaimsPrincipal` to ABP.

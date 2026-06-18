@@ -1,0 +1,551 @@
+---
+title: "Solutions, MSBuild Props and the PowerShell Build Pipeline"
+sidebarTitle: "Solution & Build"
+description: "How ABP's MSBuild props, .slnx solutions, .abpsln Studio files and PowerShell scripts compose 169 packages into a buildable, testable, packable monorepo."
+---
+
+The ABP Framework's build system is a few small `.props` files and a handful of short PowerShell scripts — but it is what holds 169 NuGet packages, 19 application modules, eight startup templates and a NuGet/MyGet release pipeline together. This page walks the root `Directory.Build.props`, `Directory.Packages.props`, `common.props`, `common.test.props` and `configureawait.props` line by line, then the `.slnx` / `.abpsln` / `.abpmdl` triplet, how `global.json` pins the .NET SDK, and finally `build/common.ps1` plus `build-all.ps1`, `build-all-release.ps1` and `test-all.ps1`.
+
+For the *what* of each folder, see [/overview/repository-layout](/overview/repository-layout); for the dependency catalog those props control, see [/overview/tech-stack-and-dependencies](/overview/tech-stack-and-dependencies). The CI artifacts produced by these scripts are then pushed by the numbered `deploy/` scripts described in [/build-deploy/release-pipeline](/build-deploy/release-pipeline).
+
+## The .NET SDK — `global.json`
+
+Every project is built against a single SDK pinned at the repo root in `global.json`:
+
+```json
+{
+  "sdk": {
+    "version": "10.0.100",
+    "rollForward": "latestFeature"
+  }
+}
+```
+
+`rollForward: latestFeature` allows the runtime to pick a higher `10.0.x` patch (e.g. `10.0.105`) but will reject a lower patch or any other major. Combined with the explicit `<TargetFramework>net10.0</TargetFramework>` (set inside individual csproj files, not the props), this guarantees every contributor builds against the same compiler and analyzer version.
+
+<Note>
+  The pinned SDK version mirrors `<Version>10.2.0-rc.3</Version>` in
+  `common.props`. ABP keeps SDK and framework majors aligned — when .NET 11
+  lands, both `global.json` and `common.props` move together.
+</Note>
+
+## Central Package Management — `Directory.Packages.props`
+
+`Directory.Packages.props` enables [Central Package Management](https://learn.microsoft.com/nuget/consume-packages/central-package-management) for the whole monorepo:
+
+```xml
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageFloatingVersionsEnabled>true</CentralPackageFloatingVersionsEnabled>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageVersion Include="Autofac" Version="8.4.0" />
+    <PackageVersion Include="Castle.Core" Version="5.2.1" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="10.0.2" />
+    <!-- ~180 more entries -->
+  </ItemGroup>
+</Project>
+```
+
+The effect: every `<PackageReference Include="Autofac" />` anywhere under the repo root resolves to exactly `8.4.0`. Csproj files **never** specify a version. The dedicated [/overview/tech-stack-and-dependencies](/overview/tech-stack-and-dependencies) page enumerates every entry and which `Volo.Abp.*` package uses it.
+
+`CentralPackageFloatingVersionsEnabled` lets a `PackageVersion` use floating notation (e.g. `Version="1.2.*"`) without MSBuild errors; ABP doesn't lean on this much but it is enabled for forward compatibility.
+
+`templates/Directory.Packages.props` is a parallel file used only by the *generated* startup templates so a freshly-scaffolded solution can be opened immediately without copying the framework's package list. It mirrors most entries from the root file.
+
+## The opt-in props — `common.props`
+
+`common.props` carries the per-package NuGet metadata that the framework imports manually from every `Volo.Abp.*` csproj. The full file is:
+
+```xml
+<Project>
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Version>10.2.0-rc.3</Version>
+    <LeptonXVersion>5.2.0-rc.3</LeptonXVersion>
+    <NoWarn>$(NoWarn);CS1591;CS0436</NoWarn>
+    <PackageIconUrl>https://abp.io/assets/abp_nupkg.png</PackageIconUrl>
+    <PackageProjectUrl>https://abp.io/</PackageProjectUrl>
+    <PackageLicenseExpression>LGPL-3.0-only</PackageLicenseExpression>
+    <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://github.com/abpframework/abp/</RepositoryUrl>
+    <PackageReadmeFile>NuGet.md</PackageReadmeFile>
+    <PackageTags>aspnetcore boilerplate framework web best-practices angular maui blazor mvc csharp webapp</PackageTags>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <AllowedOutputExtensionsInPackageBuildOutputFolder>$(AllowedOutputExtensionsInPackageBuildOutputFolder);.pdb</AllowedOutputExtensionsInPackageBuildOutputFolder>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="..\..\NuGet.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+  <!-- *.abppkg.analyze.json + *.abppkg packed as `content/` files -->
+</Project>
+```
+
+Each property maps to a concrete behavior:
+
+| Property | Effect |
+|---|---|
+| `<LangVersion>latest</LangVersion>` | Use the newest C# the SDK supports — currently C# 14. |
+| `<Version>10.2.0-rc.3</Version>` | Sets `PackageVersion` and `AssemblyVersion` for **all** `Volo.Abp.*` packages. Bumped once per release in this single file. |
+| `<LeptonXVersion>5.2.0-rc.3</LeptonXVersion>` | A side-channel variable used by the LeptonX theme packages (kept in sync). |
+| `<NoWarn>$(NoWarn);CS1591;CS0436</NoWarn>` | Suppresses "missing XML comment" (CS1591) globally and "type defined in two assemblies" (CS0436) which is common with source-only packages. |
+| `<PackageLicenseExpression>LGPL-3.0-only</PackageLicenseExpression>` | All open-source packages ship under LGPL-3.0-only. The commercial modules ship under a different license outside this repo. |
+| `<PackageReadmeFile>NuGet.md</PackageReadmeFile>` + the `<None Include="..\..\NuGet.md">` glob | Packs the framework-wide `framework/NuGet.md` (or `modules/<m>/NuGet.md`) as the package README displayed on nuget.org. |
+| `<GenerateDocumentationFile>true</GenerateDocumentationFile>` | Emits XML doc files for IDE tooltips. |
+| `AllowedOutputExtensionsInPackageBuildOutputFolder` | Adds `.pdb` to the pack output so symbol files ship inside the `.nupkg`. |
+| `Microsoft.SourceLink.GitHub` | Embeds source-link metadata so debuggers can step into ABP source from a consuming app. |
+| `*.abppkg`, `*.abppkg.analyze.json` packed as `content/` | The ABP Studio package metadata travels with the NuGet so Studio can describe an installed package. |
+
+The two conditional item groups at the bottom handle the special cases:
+
+```xml
+<ItemGroup Condition="$(AssemblyName.EndsWith('HttpApi.Client'))">
+    <EmbeddedResource Include="**\*generate-proxy.json" />
+    <Content Remove="**\*generate-proxy.json" />
+</ItemGroup>
+```
+
+Any package whose assembly name ends with `HttpApi.Client` (e.g. `Volo.Abp.Identity.HttpApi.Client.csproj`) embeds its `generate-proxy.json` files — these are the artifacts produced by the dynamic-client-proxy tooling and are consumed at runtime instead of being packaged as content.
+
+<Tip>
+  `common.props` is imported with an **explicit** `<Import Project="..\..\common.props" />`
+  in each `.csproj`, not auto-discovered. That keeps tooling projects (CLI,
+  perf tests) opt-out by simply not importing it.
+</Tip>
+
+## Test props — `common.test.props`
+
+Test projects import `common.test.props` instead of `common.props`. The full file is:
+
+```xml
+<Project>
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <NoWarn>$(NoWarn);CS1591;CS0436</NoWarn>
+    <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
+    <GenerateAssemblyConfigurationAttribute>false</GenerateAssemblyConfigurationAttribute>
+    <GenerateAssemblyCompanyAttribute>false</GenerateAssemblyCompanyAttribute>
+    <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
+  </PropertyGroup>
+</Project>
+```
+
+Differences from `common.props`:
+
+- **No** `<Version>` — test assemblies are never packed.
+- **No** `PackageLicenseExpression`, `RepositoryUrl`, etc. — same reason.
+- `<GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>` so xUnit can locate the runtime via the generated `*.runtimeconfig.json`.
+- The three `GenerateAssemblyXxxAttribute>false` flags silence "duplicate attribute" warnings when shared `AssemblyInfo` files exist.
+
+## Auto-applied props — `Directory.Build.props`
+
+`Directory.Build.props` at the repo root is the **only** file MSBuild auto-imports for every nested project. It performs one job: identify test projects and add coverlet:
+
+```xml
+<Project>
+  <PropertyGroup>
+    <IsTestProject Condition="$(MSBuildProjectFullPath.Contains('test')) and ($(MSBuildProjectName.EndsWith('.Tests')) or $(MSBuildProjectName.EndsWith('.TestBase')))">true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Condition="'$(IsTestProject)' == 'true'" Include="coverlet.collector">
+      <Version Condition="$(MSBuildProjectFullPath.Contains('templates'))">6.0.4</Version>
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+</Project>
+```
+
+Note the nested `<Version>` is only set under `templates/` because central package management doesn't apply to generated template projects — they need a literal version.
+
+## The async-cleanup weaver — `configureawait.props`
+
+`configureawait.props` is imported by select csprojs that want the [ConfigureAwait.Fody](https://github.com/Fody/ConfigureAwait) post-compile weaver:
+
+```xml
+<Project>
+  <ItemGroup Condition="'$(Configuration)' == 'Release'">
+      <PackageReference Include="ConfigureAwait.Fody" PrivateAssets="All" />
+      <PackageReference Include="Fody">
+        <PrivateAssets>All</PrivateAssets>
+        <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
+      </PackageReference>
+  </ItemGroup>
+</Project>
+```
+
+`ConfigureAwait.Fody` rewrites every `await` in the assembly to use `.ConfigureAwait(false)` semantics — sparing developers from typing it everywhere. It runs **only in Release** so debug builds keep the synchronization-context capture for easier stepping. Pair this with the `[assembly: ConfigureAwait(false)]` attribute that individual packages set.
+
+## NuGet feeds — `NuGet.Config`
+
+The repo's `NuGet.Config` declares a single source:
+
+```xml
+<configuration>
+    <packageSources>
+        <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+    </packageSources>
+</configuration>
+```
+
+That means the framework consumes only public nuget.org packages — there is no internal feed dependency. Nightly builds published by the `deploy/` scripts go to MyGet (`abp-nightly`), but that is a *publish* feed, not a consume feed.
+
+## Solution files — `.slnx`, `.abpsln`, `.abpmdl`
+
+Every solution directory under the repo carries three coordinating files:
+
+| File | Format | Consumer |
+|---|---|---|
+| `*.slnx` | XML | `dotnet build`, Visual Studio 17.10+, Rider, ReSharper. The modern replacement for the legacy `.sln`. |
+| `*.abpsln` | JSON | ABP Studio — declares which `.abpmdl` modules make up the solution. |
+| `*.abpmdl` | JSON | ABP Studio — declares which `.abppkg` packages make up one module. |
+
+For `framework/`, the trio is:
+
+- `framework/Volo.Abp.slnx` — every `src/` and `test/` `.csproj`, organized into `<Folder Name="/src/">` and `<Folder Name="/test/">` containers.
+- `framework/Volo.Abp.abpsln` — `{ "template": "empty", "modules": { "Volo.Abp": { "path": "Volo.Abp.abpmdl" } } }`.
+- `framework/Volo.Abp.abpmdl` — references every `Volo.Abp.*.abppkg` under `src/` and `test/` and groups them into `src` / `test` folders.
+
+A short excerpt from `framework/Volo.Abp.slnx`:
+
+```xml
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Volo.Abp.AI.Abstractions/Volo.Abp.AI.Abstractions.csproj" />
+    <Project Path="src/Volo.Abp.AspNetCore.Authentication.JwtBearer/Volo.Abp.AspNetCore.Authentication.JwtBearer.csproj" />
+    <!-- ~169 entries -->
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/Volo.Abp.Auditing.Tests/Volo.Abp.Auditing.Tests.csproj" />
+    <!-- ~95 entries -->
+  </Folder>
+</Solution>
+```
+
+`.slnx` is what `dotnet build` resolves; the other two are pure metadata for ABP Studio's UI. The same pattern repeats inside each `modules/<name>/` directory (e.g. `modules/identity/Volo.Abp.Identity.slnx`).
+
+The startup templates also use the `.slnx` format — see `templates/app/aspnet-core/MyCompanyName.MyProjectName.slnx` and `templates/console/MyCompanyName.MyProjectName.slnx`.
+
+<Note>
+  Older `.sln` files were removed from the repo in favor of `.slnx`. Build
+  agents that still need the legacy format can use `dotnet sln migrate` to
+  produce one on demand.
+</Note>
+
+## ABP package descriptors — `*.abppkg`
+
+Each individual `Volo.Abp.*` package directory carries an `*.abppkg` file (consumed by ABP Studio) plus an `*.abppkg.analyze.json` analyzer config. Both are packed as `content\` so a downstream `*.nupkg` carries metadata that ABP Studio uses to render package details after `dotnet add package`. The packing is wired by `common.props`:
+
+```xml
+<ItemGroup Condition="'$(UsingMicrosoftNETSdkWeb)' != 'true' AND '$(UsingMicrosoftNETSdkRazor)' != 'true'">
+    <None Remove="*.abppkg.analyze.json" />
+    <Content Include="*.abppkg.analyze.json">
+        <Pack>true</Pack>
+        <PackagePath>content\</PackagePath>
+    </Content>
+</ItemGroup>
+<ItemGroup>
+    <None Remove="*.abppkg" />
+    <Content Include="*.abppkg">
+        <Pack>true</Pack>
+        <PackagePath>content\</PackagePath>
+    </Content>
+</ItemGroup>
+```
+
+The Web/Razor SDK condition exists because those SDKs treat `Content` differently (they would copy the files into `wwwroot`), so for them only the bare `*.abppkg` is packed.
+
+## The PowerShell pipeline — `build/`
+
+The CI build pipeline lives in `build/`. There are exactly four files:
+
+- `build/common.ps1`
+- `build/build-all.ps1`
+- `build/build-all-release.ps1`
+- `build/test-all.ps1`
+
+### `build/common.ps1` — the solution list
+
+`common.ps1` is `dot-sourced` by every other script. It exports `$rootFolder` and `$solutionPaths`:
+
+```powershell
+$full = $args[0]
+$rootFolder = (Get-Item -Path "./" -Verbose).FullName
+
+# List of solutions used only in development mode
+$solutionPaths = @(
+        "../framework",
+        "../modules/basic-theme",
+        "../modules/users",
+        "../modules/permission-management",
+        "../modules/setting-management",
+        "../modules/feature-management",
+        "../modules/identity",
+        "../modules/identityserver",
+        "../modules/openiddict",
+        "../modules/tenant-management",
+        "../modules/audit-logging",
+        "../modules/background-jobs",
+        "../modules/account",
+        "../modules/cms-kit",
+        "../modules/blob-storing-database"
+    )
+
+if ($full -eq "-f")
+{
+    $solutionPaths += (
+        "../modules/client-simulation",
+        "../modules/virtual-file-explorer",
+        "../modules/docs",
+        "../modules/blogging",
+        "../templates/module/aspnet-core",
+        "../templates/app/aspnet-core",
+        "../templates/console",
+        "../templates/app-nolayers/aspnet-core",
+        "../abp_io/AbpIoLocalization",
+        "../source-code"
+    )
+    if ($env:OS -eq "Windows_NT") {
+        $solutionPaths += "../templates/wpf"
+    }
+}
+else {
+    Write-host ":::::::::::::: !!! You are in development mode !!! ::::::::::::::"
+}
+```
+
+Two passes matter here:
+
+1. **Development mode (no flag)** builds only the framework + the 15 essential modules — fast feedback for contributors.
+2. **Full mode (`-f`)** appends the rarely-changed modules (Docs, Blogging, ClientSimulation), every startup template, the abp.io localization solution, the source-code projects, and (Windows only) the WPF template.
+
+The order of `$solutionPaths` is significant: `framework/` must build first because every downstream solution restores `Volo.Abp.*` packages produced by it (or referenced from nuget.org).
+
+<Warning>
+  Run `build-all.ps1` (no `-f`) before opening a PR; run `build-all-release.ps1`
+  (which always passes `-f`) before pushing a release branch. The latter is
+  what the GitHub Actions workflow `.github/workflows/build-and-test.yml`
+  invokes.
+</Warning>
+
+### `build/build-all.ps1`
+
+```powershell
+$full = $args[0]
+. ".\common.ps1" $full
+Write-Host $solutionPaths
+
+foreach ($solutionPath in $solutionPaths) {
+    $solutionAbsPath = (Join-Path $rootFolder $solutionPath)
+    Set-Location $solutionAbsPath
+    dotnet build
+    if (-Not $?) {
+        Write-Host ("Build failed for the solution: " + $solutionPath)
+        Set-Location $rootFolder
+        exit $LASTEXITCODE
+    }
+}
+
+Set-Location $rootFolder
+```
+
+Plain `dotnet build` — Debug configuration, default CPU count, no extra logging. The script changes directory into each solution and runs `dotnet build` against the `.slnx` MSBuild picks up automatically. Fails fast on the first non-zero exit code.
+
+### `build/build-all-release.ps1`
+
+```powershell
+. ".\common.ps1" -f
+
+foreach ($solutionPath in $solutionPaths) {
+    $solutionAbsPath = (Join-Path $rootFolder $solutionPath)
+    Set-Location $solutionAbsPath
+    dotnet build --configuration Release -- /maxcpucount
+    if (-Not $?) {
+        Write-Host ("Build failed for the solution: " + $solutionPath)
+        Set-Location $rootFolder
+        exit $LASTEXITCODE
+    }
+}
+
+Set-Location $rootFolder
+```
+
+The release variant always runs in full mode (`-f` is hard-coded), uses `--configuration Release` and forces parallel MSBuild with `/maxcpucount`. This is also where `configureawait.props` activates — `ConfigureAwait.Fody` only runs in Release.
+
+### `build/test-all.ps1`
+
+```powershell
+$full = $args[0]
+. ".\common.ps1" $full
+
+foreach ($solutionPath in $solutionPaths) {
+    $solutionAbsPath = (Join-Path $rootFolder $solutionPath)
+    Set-Location $solutionAbsPath
+    dotnet test --no-build --no-restore --collect:"XPlat Code Coverage"
+    if (-Not $?) {
+        Write-Host ("Test failed for the solution: " + $solutionPath)
+        Set-Location $rootFolder
+        exit $LASTEXITCODE
+    }
+}
+
+Set-Location $rootFolder
+```
+
+`--no-build --no-restore` makes the script reuse the artifacts that `build-all.ps1` just produced — running them back-to-back is the standard CI shape:
+
+```powershell
+cd build
+.\build-all-release.ps1
+.\test-all.ps1 -f
+```
+
+`--collect:"XPlat Code Coverage"` invokes coverlet via the `coverlet.collector` package that `Directory.Build.props` injects into test projects, producing the Cobertura XML files that `codecov.yml` (at the repo root) uploads to Codecov.
+
+## End-to-end build sequence
+
+```mermaid
+flowchart TD
+    A[global.json<br/>SDK 10.0.100] --> B[dotnet restore]
+    B --> C[Directory.Build.props<br/>detects test projects]
+    B --> D[Directory.Packages.props<br/>resolves PackageVersion]
+    C --> E[csproj imports]
+    D --> E
+    E -->|src project| F[common.props<br/>NuGet metadata + SourceLink]
+    E -->|test project| G[common.test.props<br/>no packing]
+    E -->|opt-in| H[configureawait.props<br/>Fody in Release]
+    F --> I[dotnet build via .slnx]
+    G --> I
+    H --> I
+    I --> J{build/common.ps1<br/>solutionPaths}
+    J -->|framework| I
+    J -->|modules/*| I
+    J -->|templates/* (-f)| I
+    I --> K[dotnet test<br/>+ XPlat Code Coverage]
+    K --> L[nupkg/pack.ps1<br/>→ nupkg/0/]
+    L --> M[deploy/2-nuget-pack.ps1<br/>deploy/3-nuget-push.ps1]
+```
+
+## Building locally — the cookbook
+
+<Steps>
+  <Step title="Install the pinned SDK">
+    Install .NET SDK `10.0.100` (or any later `10.0.x`).
+    Verify with `dotnet --version` — it should report a `10.0.x` build.
+    `global.json` controls this for every `dotnet` invocation under the repo.
+  </Step>
+  <Step title="Restore">
+    From the repo root: `dotnet restore framework/Volo.Abp.slnx`.
+    NuGet picks up `Directory.Packages.props` automatically; the only feed is
+    nuget.org (`NuGet.Config`).
+  </Step>
+  <Step title="Build a single solution">
+    `dotnet build framework/Volo.Abp.slnx` — produces every framework `.dll`
+    in `framework/src/*/bin/Debug/net10.0/`.
+  </Step>
+  <Step title="Build everything (dev)">
+    ```
+    cd build
+    pwsh ./build-all.ps1
+    ```
+    Walks the 15 essential solutions declared in `common.ps1` and stops at
+    the first failure.
+  </Step>
+  <Step title="Build everything (release)">
+    ```
+    cd build
+    pwsh ./build-all-release.ps1
+    ```
+    Adds the 10 "full" solutions, forces Release, enables ConfigureAwait.Fody,
+    and uses `/maxcpucount`.
+  </Step>
+  <Step title="Test everything">
+    ```
+    cd build
+    pwsh ./test-all.ps1 -f
+    ```
+    Reuses the binaries from the previous step (`--no-build --no-restore`)
+    and collects code coverage into Cobertura XML.
+  </Step>
+  <Step title="Pack and push (release engineers only)">
+    `nupkg/pack.ps1` packs every csproj into `nupkg/0/`, then
+    `nupkg/push_packages.ps1` pushes them to nuget.org. The numbered scripts
+    under `deploy/` orchestrate the full release — see
+    [/build-deploy/release-pipeline](/build-deploy/release-pipeline).
+  </Step>
+</Steps>
+
+## What MSBuild evaluates per csproj
+
+A typical framework csproj like `framework/src/Volo.Abp.Core/Volo.Abp.Core.csproj` triggers, in order:
+
+| Step | File | Effect |
+|---|---|---|
+| 1 | `Directory.Build.props` (auto) | Adds coverlet to test projects; no-op for `src`. |
+| 2 | `Directory.Packages.props` (auto) | Loads `PackageVersion` items. |
+| 3 | `<Import Project="..\..\common.props" />` (manual) | NuGet metadata, SourceLink, `*.abppkg` packing. |
+| 4 | (optional) `<Import Project="..\..\configureawait.props" />` | Fody weaver in Release. |
+| 5 | `<PackageReference Include="…" />` resolved against `Directory.Packages.props`. | |
+| 6 | `dotnet build` or `dotnet pack` produces `bin/Debug/net10.0/Volo.Abp.Core.dll` + (with `dotnet pack`) a `Volo.Abp.Core.10.2.0-rc.3.nupkg`. | |
+
+The same flow for a test csproj like `framework/test/Volo.Abp.Core.Tests/`:
+
+| Step | File | Effect |
+|---|---|---|
+| 1 | `Directory.Build.props` | Detects `*.Tests` suffix, adds `coverlet.collector`. |
+| 2 | `Directory.Packages.props` | Loads `PackageVersion` items including `xunit`, `Shouldly`, `NSubstitute`. |
+| 3 | `<Import Project="..\..\common.test.props" />` | Sets test-friendly properties; **does not** set `<Version>` so the project is never packed. |
+| 4 | `<PackageReference Include="xunit" />` etc. resolved centrally. | |
+| 5 | `dotnet test --no-build --no-restore --collect:"XPlat Code Coverage"` runs xUnit + coverlet. | |
+
+## When versions change
+
+Every release touches a small, predictable set of files:
+
+| File | Field | What to bump |
+|---|---|---|
+| `common.props` | `<Version>` | New ABP version. |
+| `common.props` | `<LeptonXVersion>` | Matching LeptonX theme version. |
+| `global.json` | `sdk.version` | Only when moving to a new .NET major. |
+| `latest-versions.json` | top of array | A new entry for abp.io's version selector. |
+| `Directory.Packages.props` | individual `Version="..."` | Each upgrade (e.g. EF Core 10.0.2 → 10.0.3). |
+| `npm/ng-packs/package.json` | `version` of `@abp/*` packages | Independent but tracked together. |
+
+All four PowerShell scripts then run unchanged because they don't bake the version number anywhere.
+
+## Common build problems
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `error NU1605: Detected package downgrade` | A transitive dependency drags in a higher version than `Directory.Packages.props` pins. | Bump the central version, or add a top-level `<PackageVersion>` to override. |
+| `error CS0436: The type 'X' conflicts with the imported type 'X'` | Two source-only packages produced the same internal type. | This is suppressed globally via `<NoWarn>CS0436</NoWarn>` in `common.props`; if you still see it, you're likely missing the import. |
+| `error: project does not pack a NuGet README` | csproj uses `common.test.props` instead of `common.props`, or `<PackageReadmeFile>` got overridden. | Re-import `common.props` and confirm `NuGet.md` lives two levels above the csproj. |
+| `error MSB4019: The imported project ".../common.props" was not found.` | Path mismatch — `common.props` is always at the repo root and projects reference it via `..\..\common.props` from `framework/src/<pkg>/`. | Update the relative path. |
+| `Fody is not weaving Release output` | `configureawait.props` not imported, or building Debug. | Add `<Import Project="..\..\configureawait.props" />` and rebuild Release. |
+| Build fails on macOS with `MongoSandbox*` errors. | Tests reference platform-specific MongoDB sandbox runtimes. | Use the platform-matching `MongoSandbox8.runtime.osx-arm64` or skip the affected tests in CI. |
+
+<Warning>
+  The PowerShell scripts assume you start `pwsh` from inside `build/` — they
+  use relative paths like `../framework`. Don't `cd` to the repo root and
+  invoke `./build/build-all.ps1` directly without first switching into
+  `build/`.
+</Warning>
+
+## Related wiki pages
+
+- [/overview/repository-layout](/overview/repository-layout) — the directory map referenced by `$solutionPaths`.
+- [/overview/tech-stack-and-dependencies](/overview/tech-stack-and-dependencies) — every `PackageVersion` in `Directory.Packages.props`.
+- [/overview/modularity-model](/overview/modularity-model) — what those compiled assemblies do at runtime.
+- [/core/abp-application-and-bootstrap](/core/abp-application-and-bootstrap) — the runtime entry point that consumes the built binaries.
+- [/build-deploy/build-system](/build-deploy/build-system) — deeper coverage of MSBuild plumbing across CI.
+- [/build-deploy/release-pipeline](/build-deploy/release-pipeline) — the eight numbered scripts in `deploy/` that publish what these scripts build.
+- [/cli/overview](/cli/overview) — the ABP CLI shipped from `framework/src/Volo.Abp.Cli/`.
+- [/templates/overview](/templates/overview) — the startup templates that the release pipeline zips and uploads.

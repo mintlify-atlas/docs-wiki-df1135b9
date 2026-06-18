@@ -1,0 +1,361 @@
+---
+title: "Text Formatting"
+sidebarTitle: "Text Formatting"
+description: "ABP's reverse-format extracter and supporting tokenizer in Volo.Abp.Text.Formatting, plus the StringHelper utility for BOM-safe byte-to-string conversion."
+---
+
+The ABP Framework ships a small, dependency-free text-formatting toolkit in `Volo.Abp.Core` whose centrepiece is `FormattedStringValueExtracter` — a "reverse `string.Format`" that extracts dynamic values out of a string when given a brace-style template. This page walks through the public class, the internal `FormatStringTokenizer` it relies on, the `FormatStringToken` / `FormatStringTokenType` types, and the `StringHelper` byte-to-string utility that lives alongside them under `Volo.Abp.Core/Volo/Abp/Text/`.
+
+## Files
+
+The entire feature is five files under `framework/src/Volo.Abp.Core/Volo/Abp/Text/`:
+
+| File | Visibility | Role |
+| --- | --- | --- |
+| `Formatting/FormattedStringValueExtracter.cs` | `public` | Reverse `string.Format`. |
+| `Formatting/FormatStringTokenizer.cs` | `internal` | Splits a template into constant/dynamic tokens. |
+| `Formatting/FormatStringToken.cs` | `internal` | Single token record. |
+| `Formatting/FormatStringTokenType.cs` | `internal` | `ConstantText` vs `DynamicValue`. |
+| `StringHelper.cs` | `public` | Byte-array → string conversion, BOM-aware. |
+
+Because the file lives in `Volo.Abp.Core`, every module that pulls in the framework can use it without an extra `using` directive — the namespace is `Volo.Abp.Text` (and `Volo.Abp.Text.Formatting`).
+
+## Why a reverse formatter?
+
+`string.Format("My name is {0}.", "Neo")` turns structured data into a string. The opposite — looking at "My name is Neo." and extracting "Neo" given the format "My name is {name}." — is what ABP needs whenever it has to *parse a structured message back into named pieces*: localized exception messages, audit log templates, anonymised log lines, dynamic claim builders. `FormattedStringValueExtracter` is the small primitive that those features lean on.
+
+The class XML comment in `FormattedStringValueExtracter.cs` states the intent concisely:
+
+```csharp
+/// <summary>
+/// This class is used to extract dynamic values from a formatted string.
+/// It works as reverse of <see cref="string.Format(string,object)"/>
+/// </summary>
+/// <example>
+/// Say that str is "My name is Neo." and format is "My name is {name}.".
+/// Then Extract method gets "Neo" as "name".
+/// </example>
+public class FormattedStringValueExtracter
+{
+    // …
+}
+```
+
+## The token model
+
+Tokens come in exactly two flavours. `FormatStringTokenType.cs` enumerates them:
+
+```csharp
+internal enum FormatStringTokenType
+{
+    ConstantText,
+    DynamicValue
+}
+```
+
+`FormatStringToken.cs` is the bag that carries the literal text alongside its kind:
+
+```csharp
+internal class FormatStringToken
+{
+    public string Text { get; private set; }
+    public FormatStringTokenType Type { get; private set; }
+
+    public FormatStringToken(string text, FormatStringTokenType type)
+    {
+        Text = text;
+        Type = type;
+    }
+}
+```
+
+Both types are `internal` — they are pure implementation details of the extracter. Consumers only ever see the higher-level `ExtractionResult`.
+
+## `FormatStringTokenizer`
+
+The tokenizer (in `FormatStringTokenizer.cs`) walks the format string once. State machine:
+
+* `inDynamicValue = false`, accumulating characters into `currentText`.
+* On `{`: flush `currentText` as `ConstantText`, flip `inDynamicValue = true`.
+* On `}`: flush `currentText` as `DynamicValue`, flip `inDynamicValue = false`.
+* On every other character: append to `currentText`.
+
+```csharp
+internal class FormatStringTokenizer
+{
+    public List<FormatStringToken> Tokenize(string format, bool includeBracketsForDynamicValues = false)
+    {
+        var tokens = new List<FormatStringToken>();
+        var currentText = new StringBuilder();
+        var inDynamicValue = false;
+
+        for (var i = 0; i < format.Length; i++)
+        {
+            var c = format[i];
+            switch (c)
+            {
+                case '{':
+                    if (inDynamicValue)
+                        throw new FormatException("Incorrect syntax at char " + i +
+                            "! format string can not contain nested dynamic value expression!");
+                    inDynamicValue = true;
+                    if (currentText.Length > 0)
+                    {
+                        tokens.Add(new FormatStringToken(currentText.ToString(),
+                            FormatStringTokenType.ConstantText));
+                        currentText.Clear();
+                    }
+                    break;
+                case '}':
+                    if (!inDynamicValue)
+                        throw new FormatException("Incorrect syntax at char " + i +
+                            "! These is no opening brackets for the closing bracket }.");
+                    inDynamicValue = false;
+                    if (currentText.Length <= 0)
+                        throw new FormatException("Incorrect syntax at char " + i +
+                            "! Brackets does not containt any chars.");
+                    var dynamicValue = currentText.ToString();
+                    if (includeBracketsForDynamicValues)
+                        dynamicValue = "{" + dynamicValue + "}";
+                    tokens.Add(new FormatStringToken(dynamicValue, FormatStringTokenType.DynamicValue));
+                    currentText.Clear();
+                    break;
+                default:
+                    currentText.Append(c);
+                    break;
+            }
+        }
+
+        if (inDynamicValue)
+            throw new FormatException("There is no closing } char for an opened { char.");
+
+        if (currentText.Length > 0)
+            tokens.Add(new FormatStringToken(currentText.ToString(),
+                FormatStringTokenType.ConstantText));
+
+        return tokens;
+    }
+}
+```
+
+A few invariants worth noticing:
+
+* **No nesting.** Encountering `{` while already inside a dynamic token throws `FormatException`. There is no support for `{{x{y}}}`.
+* **No empty placeholders.** A `{}` pair is rejected — the dynamic token must contain a name.
+* **Unbalanced braces fail loudly.** A stray `}` or a missing closer both throw `FormatException` with the offending character index, which makes mis-typed templates easy to diagnose.
+* **Optional braces in output.** The `includeBracketsForDynamicValues` flag wraps dynamic tokens with their original braces (e.g. `"{name}"` instead of `"name"`). The extracter does **not** set this flag — it wants the bare name as the dictionary key — but other consumers can opt in.
+
+### Tokenizer output examples
+
+| Input format | Resulting tokens |
+| --- | --- |
+| `"Hello {name}!"` | `[ConstantText "Hello ", DynamicValue "name", ConstantText "!"]` |
+| `"{first} {second}"` | `[DynamicValue "first", ConstantText " ", DynamicValue "second"]` |
+| `"plain"` | `[ConstantText "plain"]` |
+| `"{onlyDynamic}"` | `[DynamicValue "onlyDynamic"]` |
+| `"oops {"` | `FormatException("There is no closing } char for an opened { char.")` |
+
+## `FormattedStringValueExtracter.Extract`
+
+The public API has two methods. `Extract(str, format, ignoreCase = false)` produces an `ExtractionResult` describing whether the input matched and which dynamic pieces were captured. `IsMatch(str, format, out string[] values, ignoreCase = false)` is a convenience wrapper that mirrors `Regex.IsMatch`.
+
+```csharp
+public static ExtractionResult Extract(string str, string format, bool ignoreCase = false)
+{
+    var stringComparison = ignoreCase
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
+
+    if (str == format)
+    {
+        return new ExtractionResult(true);
+    }
+
+    var formatTokens = new FormatStringTokenizer().Tokenize(format);
+    if (formatTokens.IsNullOrEmpty())
+    {
+        return new ExtractionResult(str == "");
+    }
+
+    var result = new ExtractionResult(true);
+
+    for (var i = 0; i < formatTokens.Count; i++)
+    {
+        var currentToken = formatTokens[i];
+        var previousToken = i > 0 ? formatTokens[i - 1] : null;
+
+        if (currentToken.Type == FormatStringTokenType.ConstantText)
+        {
+            if (i == 0)
+            {
+                if (!str.StartsWith(currentToken.Text, stringComparison))
+                {
+                    result.IsMatch = false;
+                    return result;
+                }
+                str = str.Substring(currentToken.Text.Length);
+            }
+            else
+            {
+                var matchIndex = str.IndexOf(currentToken.Text, stringComparison);
+                if (matchIndex < 0)
+                {
+                    result.IsMatch = false;
+                    return result;
+                }
+                Debug.Assert(previousToken != null);
+                result.Matches.Add(new NameValue(previousToken!.Text, str.Substring(0, matchIndex)));
+                str = str.Substring(matchIndex + currentToken.Text.Length);
+            }
+        }
+    }
+
+    var lastToken = formatTokens.Last();
+    if (lastToken.Type == FormatStringTokenType.DynamicValue)
+    {
+        result.Matches.Add(new NameValue(lastToken.Text, str));
+    }
+
+    return result;
+}
+```
+
+The algorithm is a single forward scan:
+
+1. **Identical fast path.** If the input equals the format string verbatim (no placeholders present), return `IsMatch = true` immediately.
+2. **Tokenize the format.** A degenerate empty format only matches an empty input.
+3. **Walk constant tokens.** For each `ConstantText`:
+   * If it is the first token, require `str.StartsWith(token.Text)`. If it does, *consume* the prefix from `str`. If not, return `IsMatch = false`.
+   * Otherwise, find the next occurrence of the constant. The piece of `str` *before* the match is the captured value for the *previous* dynamic token. Record it as a `NameValue` and consume `str` up through the end of the matched constant.
+4. **Tail dynamic value.** If the last token is dynamic, whatever remains in `str` becomes its captured value.
+
+Because the algorithm scans linearly without backtracking, ambiguous templates such as `"{a}{b}"` simply assign the entire remaining string to the *last* dynamic token (`a` ends up empty). The extracter is not a regex; it is the inverse of `string.Format`, where adjacent placeholders without a separator are ill-defined anyway.
+
+### `ExtractionResult`
+
+The nested type captures both the boolean outcome and the named matches:
+
+```csharp
+public class ExtractionResult
+{
+    public bool IsMatch { get; set; }
+    public List<NameValue> Matches { get; private set; }
+
+    internal ExtractionResult(bool isMatch)
+    {
+        IsMatch = isMatch;
+        Matches = new List<NameValue>();
+    }
+}
+```
+
+`NameValue` is the simple `(Name, Value)` pair that ABP uses widely for ordered key/value pairs. The list preserves insertion order so callers can iterate the matches in the order they appeared in the input.
+
+### `IsMatch` shortcut
+
+`IsMatch` mirrors the BCL's `Regex.IsMatch` pattern. It returns `true` and fills `out string[] values` when the input matched, and `false` with an empty array otherwise:
+
+```csharp
+public static bool IsMatch(string str, string format, out string[] values, bool ignoreCase = false)
+{
+    var result = Extract(str, format, ignoreCase);
+    if (!result.IsMatch)
+    {
+        values = new string[0];
+        return false;
+    }
+    values = result.Matches.Select(m => m.Value).ToArray();
+    return true;
+}
+```
+
+The dynamic *names* are dropped on this path; if you need them, use `Extract` directly.
+
+## End-to-end example
+
+```csharp
+var result = FormattedStringValueExtracter.Extract(
+    str: "Order 4711 has 3 items totaling 199.95 EUR.",
+    format: "Order {orderId} has {count} items totaling {total} {currency}."
+);
+
+result.IsMatch.ShouldBeTrue();
+result.Matches.ShouldBe(new[]
+{
+    new NameValue("orderId", "4711"),
+    new NameValue("count", "3"),
+    new NameValue("total", "199.95"),
+    new NameValue("currency", "EUR")
+});
+```
+
+```mermaid
+flowchart LR
+    Input["Order 4711 has 3 items totaling 199.95 EUR."]
+    Format["Order {orderId} has {count} items totaling {total} {currency}."]
+    Tokens["Const \"Order \" → Dyn orderId → Const \" has \" → Dyn count → Const \" items totaling \" → Dyn total → Const \" \" → Dyn currency → Const \".\""]
+    Result["Matches:<br/>orderId=4711<br/>count=3<br/>total=199.95<br/>currency=EUR"]
+    Input --> Format
+    Format -->|"FormatStringTokenizer.Tokenize"| Tokens
+    Input --> Result
+    Tokens -->|"linear scan"| Result
+```
+
+## `StringHelper` — BOM-safe byte conversion
+
+`Volo.Abp.Text/StringHelper.cs` lives next to the formatting types and ships a single utility:
+
+```csharp
+public class StringHelper
+{
+    public static string? ConvertFromBytesWithoutBom(byte[]? bytes, Encoding? encoding = null)
+    {
+        if (bytes == null) return null;
+
+        encoding ??= Encoding.UTF8;
+
+        var hasBom = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
+
+        if (hasBom)
+        {
+            return encoding.GetString(bytes, 3, bytes.Length - 3);
+        }
+        else
+        {
+            return encoding.GetString(bytes);
+        }
+    }
+}
+```
+
+The method exists because a file written by `File.WriteAllText` (or anything backed by `UTF8Encoding(encoderShouldEmitUTF8Identifier: true)`) starts with the bytes `EF BB BF`. Stripping them is important when the resulting string will be parsed as JSON, JavaScript or fed into the formatting extracter above — none of those formats tolerate a stray U+FEFF at position 0. The helper is reused by virtual-file readers in [Localization](/crosscutting/localization) for the same reason.
+
+## Common consumers in the framework
+
+The text-formatting utilities are intentionally small but show up in a few hot paths:
+
+* **Audit log parsing.** When a stored audit log entry contains a templated message, the extracter can replay it into named pieces for filtering or redaction without parsing arbitrary regex.
+* **Permission / feature checking.** Templated names like `"AbpIdentity.Users.Update"` can be matched against a format like `"AbpIdentity.{module}.{action}"` to extract `module` and `action`.
+* **Diagnostics.** Self-logging exceptions (see [Exception Handling](/core/exception-handling)) use the formatter to round-trip a templated message and its arguments.
+* **Localization fallback.** When a localized string contains structured `{0}`/`{name}` placeholders, both the formatter and the extracter let modules render and re-parse those messages without taking a dependency on a full templating engine.
+
+## Limitations
+
+A few things the formatter explicitly does *not* do — knowing them up front prevents surprises:
+
+| Limitation | Why |
+| --- | --- |
+| No nested placeholders | Tokenizer rejects nested `{`. |
+| No empty placeholders | Tokenizer rejects `{}`. |
+| No literal braces | There is no `{{` escape; literal braces in a template are an error. |
+| No format specifiers | `{name:n2}` would be tokenised as `name:n2`. The name is whatever the user typed. |
+| No backtracking | Adjacent dynamic tokens without separators are assigned greedily to the last token. |
+| Allocations per call | Both `Extract` and `Tokenize` allocate a fresh list; not aimed at multi-million-call hot paths. |
+
+For full parsing you should reach for a real PEG/regex pipeline; for everyday "what's the value where I put `{name}`?" the extracter is more than enough.
+
+## See also
+
+* [Localization](/crosscutting/localization) — combines this formatter with the resource pipeline to produce/parse localized templates.
+* [Auditing Contracts](/crosscutting/auditing-contracts) — `AuditLogActionInfo.Parameters` is a templated string that the formatter can decode.
+* [Exception Handling](/core/exception-handling) — `IExceptionWithSelfLogging` consumers often format/extract templated diagnostic messages.

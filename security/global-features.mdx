@@ -1,0 +1,329 @@
+---
+title: "Global Features: Compile-Time Toggles, Manager, Interceptor"
+sidebarTitle: "Global Features"
+description: "How Volo.Abp.GlobalFeatures lets modules ship features that the host enables at startup — via GlobalFeature, GlobalFeatureManager, and RequiresGlobalFeatureAttribute."
+---
+
+`Volo.Abp.GlobalFeatures` in the ABP Framework is a *startup-time* toggle system, deliberately distinct from per-tenant `Volo.Abp.Features` ([Features](/security/features-and-feature-management)). Where the latter answers "does this tenant's plan include X?", global features answer "is this entire subsystem in play at all?" — a decision the host bakes in during `PreConfigureServices`. This page walks through `GlobalFeatureManager`, the marker types (`GlobalFeature`, `GlobalModuleFeatures`), `RequiresGlobalFeatureAttribute`, the `GlobalFeatureInterceptor`, and the orthogonal `DisableAbpFeaturesAttribute` opt-out.
+
+## Why a separate system?
+
+`Volo.Abp.Features` evaluates at request time and depends on `ICurrentTenant`, `ITenantStore`, `IFeatureStore`, and database I/O. Global features have none of that — `GlobalFeatureManager.Instance` is a static singleton, `IsEnabled` is a `HashSet.Contains`, and the state is fixed at application bootstrap. The trade-off is intentional: a global feature can gate *anything*, including controller registration, EF Core entity configuration, and middleware ordering — places where you can't realistically `await IFeatureChecker.IsEnabledAsync(...)`.
+
+Because they're checked synchronously and statically, global features can also be used during dynamic-proxy interception with zero overhead. That's how the framework removes whole CRUD endpoints from a module when an opinionated host turns off "OrganizationUnits" without code surgery.
+
+## Module setup
+
+`framework/src/Volo.Abp.GlobalFeatures/Volo/Abp/GlobalFeatures/AbpGlobalFeaturesModule.cs` depends on `AbpLocalizationModule`, `AbpVirtualFileSystemModule`, and `AbpAuthorizationAbstractionsModule`. The only runtime wiring is the interceptor registrar:
+
+```csharp
+public override void PreConfigureServices(ServiceConfigurationContext context)
+{
+    context.Services.OnRegistered(GlobalFeatureInterceptorRegistrar.RegisterIfNeeded);
+}
+```
+
+The registrar in `GlobalFeatureInterceptorRegistrar.cs` only attaches the interceptor to types that implement the marker `IGlobalFeatureCheckingEnabled`:
+
+```csharp
+private static bool ShouldIntercept(Type type)
+{
+    return !DynamicProxyIgnoreTypes.Contains(type) &&
+           typeof(IGlobalFeatureCheckingEnabled).IsAssignableFrom(type);
+}
+```
+
+This is different from `RequiresFeatureAttribute` — there is no "scan for the attribute" step. Modules opt their service interfaces in by deriving from `IGlobalFeatureCheckingEnabled`; the attribute then declares *which* feature must be enabled.
+
+## `GlobalFeatureManager`
+
+`framework/src/Volo.Abp.GlobalFeatures/Volo/Abp/GlobalFeatures/GlobalFeatureManager.cs` is a static-instance container:
+
+```csharp
+public class GlobalFeatureManager
+{
+    public static GlobalFeatureManager Instance { get; protected set; } = new GlobalFeatureManager();
+
+    public Dictionary<object, object> Configuration { get; }
+    public GlobalModuleFeaturesDictionary Modules { get; }
+    protected HashSet<string> EnabledFeatures { get; }
+
+    public virtual bool IsEnabled<TFeature>()  => IsEnabled(typeof(TFeature));
+    public virtual bool IsEnabled(Type t)       => IsEnabled(GlobalFeatureNameAttribute.GetName(t));
+    public virtual bool IsEnabled(string name)  => EnabledFeatures.Contains(name);
+    public virtual void Enable(string name)     => EnabledFeatures.AddIfNotContains(name);
+    public virtual void Disable(string name)    => EnabledFeatures.Remove(name);
+}
+```
+
+The `Instance` property is the access point everywhere — interceptors and modules call `GlobalFeatureManager.Instance.IsEnabled<TFeature>()`. Hosts mutate the set during `PreConfigureServices`, typically through a module-supplied facade.
+
+## `GlobalFeature` and `GlobalModuleFeatures`
+
+A module exposes named global features by deriving from `GlobalFeature` and grouping them in a `GlobalModuleFeatures` subclass.
+
+`framework/src/Volo.Abp.GlobalFeatures/Volo/Abp/GlobalFeatures/GlobalFeature.cs`:
+
+```csharp
+public abstract class GlobalFeature
+{
+    public GlobalModuleFeatures Module { get; }
+    public GlobalFeatureManager FeatureManager { get; }
+    public string FeatureName { get; }
+
+    public bool IsEnabled {
+        get => FeatureManager.IsEnabled(FeatureName);
+        set => SetEnabled(value);
+    }
+
+    protected GlobalFeature(GlobalModuleFeatures module)
+    {
+        Module = Check.NotNull(module, nameof(module));
+        FeatureManager = Module.FeatureManager;
+        FeatureName = GlobalFeatureNameAttribute.GetName(GetType());
+    }
+
+    public virtual void Enable()  => FeatureManager.Enable(FeatureName);
+    public virtual void Disable() => FeatureManager.Disable(FeatureName);
+    public void SetEnabled(bool isEnabled) { if (isEnabled) Enable(); else Disable(); }
+}
+```
+
+The `FeatureName` is resolved at construction via `GlobalFeatureNameAttribute`:
+
+```csharp
+[GlobalFeatureName("CmsKit.Blogs")]
+public class BlogsFeature : GlobalFeature
+{
+    internal BlogsFeature(CmsKitGlobalFeatures module) : base(module) { }
+}
+```
+
+`framework/src/Volo.Abp.GlobalFeatures/Volo/Abp/GlobalFeatures/GlobalFeatureNameAttribute.cs` requires the attribute or throws:
+
+```csharp
+public static string GetName(Type type)
+{
+    var attribute = type.GetCustomAttributes<GlobalFeatureNameAttribute>().FirstOrDefault();
+    if (attribute == null)
+        throw new AbpException($"{type.AssemblyQualifiedName} should define the {typeof(GlobalFeatureNameAttribute).FullName} atttribute!");
+    return attribute.Name;
+}
+```
+
+`GlobalModuleFeatures` (`GlobalModuleFeatures.cs`) is the per-module container:
+
+```csharp
+public abstract class GlobalModuleFeatures
+{
+    public GlobalFeatureManager FeatureManager { get; }
+    protected GlobalFeatureDictionary AllFeatures { get; }
+
+    public virtual void Enable<TFeature>()  where TFeature : GlobalFeature
+        => GetFeature<TFeature>().Enable();
+
+    public virtual void Disable<TFeature>() where TFeature : GlobalFeature
+        => GetFeature<TFeature>().Disable();
+
+    public virtual void EnableAll()  { foreach (var f in AllFeatures.Values) f.Enable(); }
+    public virtual void DisableAll() { foreach (var f in AllFeatures.Values) f.Disable(); }
+
+    public virtual TFeature GetFeature<TFeature>() where TFeature : GlobalFeature
+        => (TFeature)GetFeature(GlobalFeatureNameAttribute.GetName<TFeature>());
+
+    protected void AddFeature(GlobalFeature feature)
+        => AllFeatures[feature.FeatureName] = feature;
+}
+```
+
+A module ships:
+
+```csharp
+public class CmsKitGlobalFeatures : GlobalModuleFeatures
+{
+    public BlogsFeature Blogs { get; }
+    public PagesFeature Pages { get; }
+
+    public CmsKitGlobalFeatures(GlobalFeatureManager featureManager) : base(featureManager)
+    {
+        Blogs = new BlogsFeature(this);
+        Pages = new PagesFeature(this);
+        AddFeature(Blogs);
+        AddFeature(Pages);
+    }
+}
+```
+
+And the host enables them at startup, typically via an extension method:
+
+```csharp
+GlobalFeatureManager.Instance.Modules.CmsKit(cms =>
+{
+    cms.Blogs.Enable();
+    cms.Pages.Enable();
+});
+```
+
+The `GlobalModuleFeaturesDictionary` is `Dictionary<string, GlobalModuleFeatures>` keyed by module name, which is what gives `.CmsKit(...)`, `.Identity(...)`, etc. their hook points.
+
+## `RequiresGlobalFeatureAttribute`
+
+`framework/src/Volo.Abp.GlobalFeatures/Volo/Abp/GlobalFeatures/RequiresGlobalFeatureAttribute.cs`:
+
+```csharp
+[AttributeUsage(AttributeTargets.Class)]
+public class RequiresGlobalFeatureAttribute : Attribute
+{
+    public Type? Type { get; }
+    public string? Name { get; }
+
+    public RequiresGlobalFeatureAttribute(Type type) { Type = type; }
+    public RequiresGlobalFeatureAttribute(string name) { Name = name; }
+
+    public virtual string GetFeatureName() =>
+        Name ?? GlobalFeatureNameAttribute.GetName(Type!);
+}
+```
+
+The attribute is class-only (no method targets), reflecting the "subsystem-level" granularity of global features. Two forms — by `Type` (compile-time-safe, refactor-friendly) or by `Name` (string, for cross-module references that you don't want a hard reference to).
+
+## `GlobalFeatureInterceptor` and `GlobalFeatureHelper`
+
+`framework/src/Volo.Abp.GlobalFeatures/Volo/Abp/GlobalFeatures/GlobalFeatureInterceptor.cs`:
+
+```csharp
+public class GlobalFeatureInterceptor : AbpInterceptor, ITransientDependency
+{
+    public override async Task InterceptAsync(IAbpMethodInvocation invocation)
+    {
+        if (AbpCrossCuttingConcerns.IsApplied(invocation.TargetObject, AbpCrossCuttingConcerns.GlobalFeatureChecking))
+        {
+            await invocation.ProceedAsync();
+            return;
+        }
+
+        if (invocation.TargetObject != null &&
+            !GlobalFeatureHelper.IsGlobalFeatureEnabled(invocation.TargetObject.GetType(), out var attribute))
+        {
+            throw new AbpGlobalFeatureNotEnabledException(code: AbpGlobalFeatureErrorCodes.GlobalFeatureIsNotEnabled)
+                .WithData("ServiceName", invocation.TargetObject.GetType().FullName!)
+                .WithData("GlobalFeatureName", attribute!.Name!);
+        }
+
+        await invocation.ProceedAsync();
+    }
+}
+```
+
+`GlobalFeatureHelper.IsGlobalFeatureEnabled` (in `GlobalFeatureHelper.cs`):
+
+```csharp
+public static bool IsGlobalFeatureEnabled(Type type, out RequiresGlobalFeatureAttribute? attribute)
+{
+    attribute = ReflectionHelper.GetSingleAttributeOrDefault<RequiresGlobalFeatureAttribute>(type);
+    return attribute == null || GlobalFeatureManager.Instance.IsEnabled(attribute.GetFeatureName());
+}
+```
+
+A type with no attribute is always considered "enabled". A type with the attribute is enabled only when the global feature is in `EnabledFeatures`. The interceptor throws `AbpGlobalFeatureNotEnabledException` (an `AbpException` with an error code) when the gate fails — a deliberately *different* exception type from `AbpAuthorizationException` because the meaning is different ("this code path doesn't exist in this deployment", not "you may not access it").
+
+```mermaid
+flowchart TD
+    A[Service implements<br/>IGlobalFeatureCheckingEnabled] --> B[GlobalFeatureInterceptorRegistrar<br/>attaches interceptor]
+    B --> C[Call enters proxy]
+    C --> D{[DisableAbpFeatures]<br/>applied?}
+    D -- yes --> H[ProceedAsync]
+    D -- no --> E{Class has<br/>[RequiresGlobalFeature]?}
+    E -- no --> H
+    E -- yes --> F{GlobalFeatureManager<br/>IsEnabled?}
+    F -- yes --> H
+    F -- no --> G[Throw AbpGlobalFeatureNotEnabledException]
+```
+
+## `DisableAbpFeaturesAttribute`
+
+`framework/src/Volo.Abp.Core/Volo/Abp/DisableAbpFeaturesAttribute.cs` is the *broad* opt-out — placed on a class to tell the framework to skip *all* its cross-cutting feature mechanics for that type, not just global features:
+
+```csharp
+[AttributeUsage(AttributeTargets.Class)]
+public class DisableAbpFeaturesAttribute : Attribute
+{
+    public bool DisableInterceptors { get; set; } = true;
+    public bool DisableMiddleware { get; set; } = true;
+    public bool DisableMvcFilters { get; set; } = true;
+}
+```
+
+| Property | Effect |
+| --- | --- |
+| `DisableInterceptors` | `AbpRegistrationBuilderExtensions` (Autofac) skips adding interceptors to this registration |
+| `DisableMiddleware` | `AbpMiddlewareBase` short-circuits when this attribute is on the controller class |
+| `DisableMvcFilters` | `AbpMvcActionDescriptorProvider` removes built-in ABP filters from the controller action |
+
+The attribute lives in `Volo.Abp.Core` (not `Volo.Abp.GlobalFeatures`) because it cross-cuts more than one subsystem. Look-ups happen in three places (file paths are the same in source):
+
+- `framework/src/Volo.Abp.Autofac/Autofac/Builder/AbpRegistrationBuilderExtensions.cs` — disables interceptor wiring at registration.
+- `framework/src/Volo.Abp.AspNetCore/Volo/Abp/AspNetCore/Middleware/AbpMiddlewareBase.cs` — disables ABP middleware for the controller.
+- `framework/src/Volo.Abp.AspNetCore.Mvc/Volo/Abp/AspNetCore/Mvc/AbpMvcActionDescriptorProvider.cs` — strips ABP MVC filters.
+
+This is useful when an external library defines a controller that ABP discovers but you don't want any of the framework cross-cutting concerns applied — a foreign HealthChecks endpoint, for example.
+
+## State-checker integration
+
+`RequireGlobalFeaturesSimpleStateChecker<TState>` lets you gate a `PermissionDefinition` or `SettingDefinition` on one or more global features:
+
+```csharp
+public class RequireGlobalFeaturesSimpleStateChecker<TState> : ISimpleStateChecker<TState>
+    where TState : IHasSimpleStateCheckers<TState>
+{
+    public string[] GlobalFeatureNames { get; }
+    public bool RequiresAll { get; }
+
+    public Task<bool> IsEnabledAsync(SimpleStateCheckerContext<TState> context)
+    {
+        var isEnabled = RequiresAll
+            ? GlobalFeatureNames.All(x => GlobalFeatureManager.Instance.IsEnabled(x))
+            : GlobalFeatureNames.Any(x => GlobalFeatureManager.Instance.IsEnabled(x));
+
+        return Task.FromResult(isEnabled);
+    }
+}
+```
+
+Hooked up through fluent extensions in `GlobalFeatureSimpleStateCheckerExtensions.cs`:
+
+```csharp
+context.AddPermission("CmsKit.Blogs.Create")
+    .RequireGlobalFeatures<BlogsFeature>();
+```
+
+Effect: even if a tenant admin grants `CmsKit.Blogs.Create` to a user, the permission checker will return `false` while `BlogsFeature.IsEnabled` is `false` — because the state-checker gate inside [`PermissionChecker`](/security/permissions) prevents the value providers from being consulted.
+
+## Serialization
+
+`GlobalFeaturesSimpleStateCheckerSerializerContributor` (in the same folder) round-trips `RequireGlobalFeaturesSimpleStateChecker` instances through `ISimpleStateCheckerSerializer`. This is what lets the [feature-management module](/modules/feature-management) and [permission-management module](/modules/permission-management) persist dynamic definitions whose conditions reference global features.
+
+## Comparing the two feature systems
+
+| Aspect | `Volo.Abp.GlobalFeatures` | `Volo.Abp.Features` |
+| --- | --- | --- |
+| Granularity | Per deployment / module composition | Per tenant / edition |
+| Set when | Startup (`PreConfigureServices`) | Anytime (runtime via admin UI) |
+| Storage | In-memory `HashSet<string>` | `IFeatureStore` (DB) |
+| API | `GlobalFeatureManager.Instance.IsEnabled<T>()` (sync) | `IFeatureChecker.IsEnabledAsync(name)` (async) |
+| Attribute | `[RequiresGlobalFeature]` (class only) | `[RequiresFeature]` (class or method) |
+| Interceptor opt-in | implement `IGlobalFeatureCheckingEnabled` | presence of `[RequiresFeature]` |
+| Exception | `AbpGlobalFeatureNotEnabledException` | `AbpAuthorizationException` |
+| Typical use | "Is the Blog subsystem compiled in?" | "Is Blog in this tenant's plan?" |
+| Tenant-aware? | No | Yes (via `ICurrentTenant`) |
+
+The two are complementary: a CMS module can ship a `BlogsFeature` global feature *and* a `Cms.Blogs.MaxPosts` tenant feature. The global one decides whether the whole subsystem is compiled into a given host; the tenant one decides per-tenant limits inside that subsystem.
+
+## Related pages and modules
+
+- [Features](/security/features-and-feature-management) — the per-tenant runtime feature system.
+- [Permissions](/security/permissions) — the `RequireGlobalFeatures` state checker on `PermissionDefinition`.
+- [Simple State Checking](/security/simple-state-checking) — `ISimpleStateChecker<>` mechanics.
+- [Feature Management module](/modules/feature-management) — runtime UI for `Volo.Abp.Features`.
+- [Permission Management module](/modules/permission-management) — companion module for permissions.
+- [Identity module](/modules/identity) — many of its sub-features are gated by global features (OUs, claim types).

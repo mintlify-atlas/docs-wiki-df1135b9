@@ -1,0 +1,616 @@
+---
+title: "Project Building Pipeline: Context, Args, and Steps"
+sidebarTitle: "Project Building"
+description: "Inside the ABP CLI ProjectBuilding pipeline — ProjectBuildContext, ProjectBuildArgs, the pipeline builder, and the dozens of transformation steps."
+---
+
+The ABP Framework CLI generates new solutions by streaming a template ZIP through a list of in-memory transformations. This page dissects the `Volo.Abp.Cli.ProjectBuilding` namespace: the immutable `ProjectBuildArgs` input, the mutable `ProjectBuildContext` that flows through the pipeline, the `ProjectBuildPipelineStep` base class that every transformation inherits, and a representative cross-section of the `Steps/` folder (rename, connection-string change, DBMS swap, license-code splice, zip-out). The companion page [/cli/templates-and-bundling](/cli/templates-and-bundling) covers the `abp new` command surface that drives this pipeline; here we stay below the command layer.
+
+## Where the code lives
+
+Everything described here is under `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/`. The folder layout is:
+
+| Path | Contents |
+| --- | --- |
+| `ProjectBuilding/IProjectBuilder.cs` | The single-method builder interface |
+| `ProjectBuilding/TemplateProjectBuilder.cs` | The default implementation for solution templates |
+| `ProjectBuilding/ModuleProjectBuilder.cs` | Variant used by `abp get-source` for modules |
+| `ProjectBuilding/NugetPackageProjectBuilder.cs` | Variant for single-package sources |
+| `ProjectBuilding/NpmPackageProjectBuilder.cs` | Variant for single npm-package sources |
+| `ProjectBuilding/ProjectBuildArgs.cs` | The immutable input record |
+| `ProjectBuilding/ProjectBuildResult.cs` | The output (zip bytes + project name) |
+| `ProjectBuilding/Building/ProjectBuildContext.cs` | The mutable state passed through the steps |
+| `ProjectBuilding/Building/ProjectBuildPipeline.cs` | The list-of-steps executor |
+| `ProjectBuilding/Building/ProjectBuildPipelineStep.cs` | The abstract step base class |
+| `ProjectBuilding/Building/TemplateProjectBuildPipelineBuilder.cs` | The factory that picks the right step list per template |
+| `ProjectBuilding/Building/Steps/` | The 30+ concrete pipeline steps |
+| `ProjectBuilding/Files/` | `FileEntry`, `FileEntryList`, and extension helpers |
+| `ProjectBuilding/Templates/` | The `TemplateInfo` subclasses for every template family |
+
+## `IProjectBuilder` — one method, four implementations
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/IProjectBuilder.cs` is intentionally tiny:
+
+```csharp
+public interface IProjectBuilder
+{
+    Task<ProjectBuildResult> BuildAsync(ProjectBuildArgs args);
+}
+```
+
+There are four implementations in the same folder, each constructed by Autofac and each picking a different source-code store:
+
+- `TemplateProjectBuilder` — full solution templates (`app`, `module`, microservice, etc.). Used by `NewCommand`.
+- `ModuleProjectBuilder` — multi-package application modules. Used by `GetSourceCommand`.
+- `NugetPackageProjectBuilder` — a single NuGet package's source.
+- `NpmPackageProjectBuilder` — a single npm package's source.
+
+This page focuses on `TemplateProjectBuilder` because it is the one that drives `abp new`; the others share the same `ProjectBuildContext`, just with different upstream metadata.
+
+## `ProjectBuildArgs` — the input record
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/ProjectBuildArgs.cs` is the immutable contract that `NewCommand.ExecuteAsync` constructs from the parsed `CommandLineArgs`. Every option a user can pass to `abp new` shows up here:
+
+```csharp
+public class ProjectBuildArgs
+{
+    [NotNull] public SolutionName SolutionName { get; }
+    [CanBeNull] public string TemplateName { get; set; }
+    [CanBeNull] public string Version { get; set; }
+    public bool TrustUserVersion { get; set; }
+    public DatabaseProvider DatabaseProvider { get; set; }
+    public DatabaseManagementSystem DatabaseManagementSystem { get; set; }
+    public UiFramework UiFramework { get; set; }
+    public MobileApp? MobileApp { get; set; }
+    public bool PublicWebSite { get; set; }
+    [CanBeNull] public string AbpGitHubLocalRepositoryPath { get; set; }
+    [CanBeNull] public string VoloGitHubLocalRepositoryPath { get; set; }
+    [CanBeNull] public string TemplateSource { get; set; }
+    [CanBeNull] public string ConnectionString { get; set; }
+    [NotNull]  public string OutputFolder { get; set; }
+    public bool Pwa { get; set; }
+    public Theme? Theme { get; set; }
+    public ThemeStyle? ThemeStyle { get; set; }
+    public bool SkipCache { get; set; }
+    [NotNull] public Dictionary<string, string> ExtraProperties { get; set; }
+    // ...
+}
+```
+
+A few subtleties:
+
+- `SolutionName` is its own class (`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/SolutionName.cs`) so `Acme.BookStore` is split into a company name and a project name without re-parsing inside every step.
+- `ExtraProperties` is a free-form `Dictionary<string, string>` that lets commands forward CLI flags the strongly-typed args do not model — for example `local-framework-ref`, `api-key`, or `license-code`. The pipeline steps look up these keys explicitly.
+- `Theme`/`ThemeStyle` are nullable; `TemplateProjectBuilder.ConfigureThemeOptions` zeros them out for templates older than 6.0.0-rc.1.
+- The constructor is a single ctor with named/optional parameters, not an init-only object initializer, so every argument is validated at construction time via `Check.NotNull`.
+
+## `ProjectBuildContext` — the mutable working state
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/Building/ProjectBuildContext.cs` is what flows down the pipeline. It composes the immutable `ProjectBuildArgs` with the loaded template metadata and the file list that the steps mutate:
+
+```csharp
+public class ProjectBuildContext
+{
+    [NotNull] public TemplateFile TemplateFile { get; }
+    [NotNull] public ProjectBuildArgs BuildArgs { get; }
+    public TemplateInfo Template { get; }
+    public ModuleInfo Module { get; }
+    public NugetPackageInfo NugetPackage { get; }
+    public NpmPackageInfo NpmPackage { get; }
+    public FileEntryList Files { get; set; }
+    public ProjectResult Result { get; set; }
+    public List<string> Symbols { get; }
+    // ...
+}
+```
+
+- `TemplateFile` carries the downloaded ZIP bytes and the resolved semantic version, exposed via `Volo.Abp.Cli.ProjectBuilding.TemplateFile`.
+- `Template` is the strongly-typed metadata class (one of the subclasses under `ProjectBuilding/Templates/`). It exposes `IsPro()`, `IsNoLayer()`, and `GetCustomSteps(context)`.
+- `Files` starts out null and is populated by the first step in the pipeline (`FileEntryListReadStep`). Every subsequent step reads from and writes to this `FileEntryList`.
+- `Result` collects the final zip bytes that the last step writes; the builder hands `Result.ZipContent` back to the caller wrapped in a `ProjectBuildResult`.
+- `Symbols` is a per-build scratchpad string list. The source has a `TODO` comment about populating it with values like `"UI-Angular"`, `"CMS-KIT"` for downstream conditionals; today it is left empty.
+
+## `ProjectBuildPipelineStep` — the step base class
+
+Every transformation derives from this tiny abstract class in `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/Building/ProjectBuildPipelineStep.cs`:
+
+```csharp
+public abstract class ProjectBuildPipelineStep
+{
+    public abstract void Execute(ProjectBuildContext context);
+}
+```
+
+There is no async overload, no return value, no continuation hook. Steps mutate `context.Files` (or `context.Result`) in place and return. The container `ProjectBuildPipeline` in `ProjectBuildPipeline.cs` is similarly minimal:
+
+```csharp
+public class ProjectBuildPipeline
+{
+    public ProjectBuildContext Context { get; }
+    public List<ProjectBuildPipelineStep> Steps { get; }
+
+    public ProjectBuildPipeline(ProjectBuildContext context)
+    {
+        Context = context;
+        Steps = new List<ProjectBuildPipelineStep>();
+    }
+
+    public void Execute()
+    {
+        foreach (var step in Steps)
+        {
+            step.Execute(Context);
+        }
+    }
+}
+```
+
+Step order matters. The pipeline executes sequentially; later steps see the file list left by earlier ones. The builder owns the ordering; see [the next section](#templateprojectbuildpipelinebuilder).
+
+## `TemplateProjectBuildPipelineBuilder`
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/Building/TemplateProjectBuildPipelineBuilder.cs` is a static factory that returns a fully populated pipeline based on the template, the requested UI, and the template version:
+
+```csharp
+public static class TemplateProjectBuildPipelineBuilder
+{
+    public static ProjectBuildPipeline Build(ProjectBuildContext context)
+    {
+        var pipeline = new ProjectBuildPipeline(context);
+
+        pipeline.Steps.Add(new FileEntryListReadStep());
+
+        if (SemanticVersion.Parse(context.TemplateFile.Version) > new SemanticVersion(4, 3, 99))
+        {
+            pipeline.Steps.Add(new CreateAppSettingsSecretsStep());
+        }
+
+        pipeline.Steps.AddRange(context.Template.GetCustomSteps(context));
+
+        pipeline.Steps.Add(new ProjectReferenceReplaceStep());
+        pipeline.Steps.Add(new TemplateCodeDeleteStep());
+        pipeline.Steps.Add(new SolutionRenameStep());
+
+        if (context.Template.IsPro())
+        {
+            pipeline.Steps.Add(new LicenseCodeReplaceStep());
+        }
+
+        if (context.Template.Name == AppTemplate.TemplateName ||
+            context.Template.Name == AppProTemplate.TemplateName)
+        {
+            pipeline.Steps.Add(new DatabaseManagementSystemChangeStep(
+                context.Template.As<AppTemplateBase>().HasDbMigrations));
+        }
+
+        if (context.Template.Name == AppNoLayersTemplate.TemplateName ||
+            context.Template.Name == AppNoLayersProTemplate.TemplateName)
+        {
+            pipeline.Steps.Add(new AppNoLayersDatabaseManagementSystemChangeStep());
+        }
+
+        if (context.Template.Name == ModuleTemplate.TemplateName ||
+            context.Template.Name == ModuleProTemplate.TemplateName)
+        {
+            pipeline.Steps.Add(new AppModuleDatabaseManagementSystemChangeStep());
+        }
+
+        if ((context.BuildArgs.UiFramework == UiFramework.Mvc ||
+             context.BuildArgs.UiFramework == UiFramework.Blazor ||
+             context.BuildArgs.UiFramework == UiFramework.BlazorServer ||
+             context.BuildArgs.UiFramework == UiFramework.BlazorWebApp)
+            && context.BuildArgs.MobileApp == MobileApp.None
+            && context.Template.Name != MicroserviceProTemplate.TemplateName
+            && context.Template.Name != MicroserviceServiceProTemplate.TemplateName)
+        {
+            pipeline.Steps.Add(new RemoveRootFolderStep());
+        }
+
+        pipeline.Steps.Add(new CheckRedisPreRequirements());
+
+        pipeline.Steps.Add(new CreateProjectResultZipStep());
+
+        return pipeline;
+    }
+}
+```
+
+Several layers of branching are visible:
+
+1. **Version-gated steps.** `CreateAppSettingsSecretsStep` only runs for templates above 4.3.99 because older templates have no `appsettings.secrets.json` to seed.
+2. **Custom template steps.** `context.Template.GetCustomSteps(context)` returns template-specific transformations. For `AppTemplate` this includes port adjustments and Angular tweaks; for microservice templates it includes the cryptographic randomization steps under `ProjectBuilding/Templates/`.
+3. **Pro-only steps.** `LicenseCodeReplaceStep` is appended only for `*-pro` templates.
+4. **Template-family DBMS swaps.** Three near-identical steps (`DatabaseManagementSystemChangeStep`, `AppNoLayersDatabaseManagementSystemChangeStep`, `AppModuleDatabaseManagementSystemChangeStep`) cover the three template families.
+5. **UI-driven folder pruning.** `RemoveRootFolderStep` unwraps the solution root when the user picked an MVC/Blazor template with no mobile sibling.
+6. **Always-last steps.** `CheckRedisPreRequirements` and `CreateProjectResultZipStep` are the bookends.
+
+## `FileEntryListReadStep` — turning bytes into entries
+
+The first step in every pipeline is `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/Building/Steps/FileEntryListReadStep.cs`. It unpacks the template ZIP into an in-memory `FileEntryList`:
+
+```csharp
+public class FileEntryListReadStep : ProjectBuildPipelineStep
+{
+    public override void Execute(ProjectBuildContext context)
+    {
+        context.Files = GetEntriesFromZipFile(context.TemplateFile.FileBytes);
+    }
+
+    private static FileEntryList GetEntriesFromZipFile(byte[] fileBytes)
+    {
+        var fileEntries = new List<FileEntry>();
+
+        using (var memoryStream = new MemoryStream(fileBytes))
+        using (var zipInputStream = new ZipInputStream(memoryStream))
+        {
+            var zipEntry = zipInputStream.GetNextEntry();
+            while (zipEntry != null)
+            {
+                var buffer = new byte[4096];
+                using (var fileEntryMemoryStream = new MemoryStream())
+                {
+                    StreamUtils.Copy(zipInputStream, fileEntryMemoryStream, buffer);
+                    fileEntries.Add(new FileEntry(
+                        zipEntry.Name.EnsureStartsWith('/'),
+                        fileEntryMemoryStream.ToArray(),
+                        zipEntry.IsDirectory));
+                }
+                zipEntry = zipInputStream.GetNextEntry();
+            }
+        }
+
+        return new FileEntryList(fileEntries);
+    }
+}
+```
+
+`FileEntry` (under `ProjectBuilding/Files/FileEntry.cs`) wraps a single ZIP entry. It auto-detects the encoding from the BOM, exposes both `Bytes` and a string `Content`, and recomputes `IsBinaryFile` from a hard-coded list of extensions every time `SetName` is called. The file list lives entirely in memory until `CreateProjectResultZipStep` rezips it.
+
+## `FileEntry` mutation helpers
+
+`FileEntry` is the workhorse data type. Every transformation step talks to it through one of three mutation methods:
+
+```csharp
+public void SetContent(string fileContent)
+{
+    Content = fileContent;
+    Bytes = Encoding.GetBytes(fileContent);
+}
+
+public void SetLines(IEnumerable<string> lines)
+{
+    SetContent(lines.JoinAsString(Environment.NewLine));
+}
+
+public void SetName(string fileName)
+{
+    Name = fileName;
+    IsBinaryFile = CalculateIsBinaryFile();
+}
+```
+
+There are also LINQ-style helpers in `FileEntryExtensions.cs` (`ReplaceText`, `NormalizeLineEndings`, and others). Pipeline steps almost never touch `Bytes` directly; they go through `SetContent`/`SetLines` so the encoding round-trips correctly.
+
+## Representative steps
+
+Below are the steps that illustrate the most common transformation patterns. Every step under `ProjectBuilding/Building/Steps/` follows one of these shapes.
+
+### Renaming projects: `ProjectRenameStep`
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/Building/Steps/ProjectRenameStep.cs` is the canonical example of a rename step. It scans `*.csproj`, `*.sln`/`*.slnx`, and `*.cs` files, then rewrites both file contents and file *names* containing the old name:
+
+```csharp
+public override void Execute(ProjectBuildContext context)
+{
+    var csprojFiles = context.Files.Where(f => f.Name.EndsWith(".csproj"));
+    foreach (var file in csprojFiles)
+    {
+        if (file.Name.Contains(_oldName))
+        {
+            file.SetName(file.Name.Replace(_oldName, _newName));
+        }
+    }
+
+    var files = context.Files.Where(f =>
+        f.Name.EndsWith(".sln") || f.Name.EndsWith(".slnx") || f.Name.EndsWith(".cs"));
+    foreach (var file in files)
+    {
+        file.NormalizeLineEndings();
+        var lines = file.GetLines();
+
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (lines[i].Contains(_oldName))
+            {
+                lines[i] = lines[i].Replace(_oldName, _newName);
+            }
+        }
+        file.SetLines(lines);
+    }
+
+    var directoryFiles = context.Files.Where(f => f.Name.Contains(_oldName));
+    foreach (var file in directoryFiles)
+    {
+        file.SetName(file.Name.Replace(_oldName, _newName));
+    }
+}
+```
+
+The companion `SolutionRenameStep` and the more sophisticated `SolutionRenamer` helper (also under `Steps/`) handle the cross-file solution rename triggered by `args.SolutionName`.
+
+### Rewriting connection strings: `ConnectionStringChangeStep`
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/Building/Steps/ConnectionStringChangeStep.cs` shows the JSON-aware pattern. It only runs when the user provided `--connection-string`, walks every `appsettings.json` in the file list, and rewrites the `Default` connection string with proper backslash escaping:
+
+```csharp
+public class ConnectionStringChangeStep : ProjectBuildPipelineStep
+{
+    private const string DefaultConnectionStringKey = "Default";
+
+    public override void Execute(ProjectBuildContext context)
+    {
+        var appSettingsJsonFiles = context.Files.Where(f =>
+            f.Name.EndsWith("appsettings.json", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        if (!appSettingsJsonFiles.Any())
+        {
+            return;
+        }
+
+        var newConnectionString = $"\"{DefaultConnectionStringKey}\": \"{context.BuildArgs.ConnectionString
+            .Replace(@"\\", @"\").Replace(@"\", @"\\")}\"";
+
+        foreach (var appSettingsJson in appSettingsJsonFiles)
+        {
+            // parse JSON, find ConnectionStrings.Default, replace the raw text
+        }
+    }
+}
+```
+
+The step uses raw text substitution rather than re-serializing the JSON so it preserves comments, formatting, and trailing-comma quirks that the templates rely on.
+
+### Swapping the database provider: `DatabaseManagementSystemChangeStep`
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/Building/Steps/DatabaseManagementSystemChangeStep.cs` rewrites NuGet references and `UseSqlServer` calls based on `args.DatabaseManagementSystem`. It is constructed with a `bool hasDbMigrations` flag — different template versions place the DbContext factory in different files, so the step needs to know whether to look for `MigrationsDbContextFactoryBase` or `DbContextFactoryBase`:
+
+```csharp
+public override void Execute(ProjectBuildContext context)
+{
+    switch (context.BuildArgs.DatabaseManagementSystem)
+    {
+        case DatabaseManagementSystem.MySQL:
+            ChangeEntityFrameworkCoreDependency(context, "Volo.Abp.EntityFrameworkCore.MySQL",
+                "Volo.Abp.EntityFrameworkCore.MySQL",
+                "AbpEntityFrameworkCoreMySQLModule");
+            AddMySqlServerVersion(context);
+            ChangeUseSqlServer(context, "UseMySQL", "UseMySql");
+            break;
+
+        case DatabaseManagementSystem.PostgreSQL:
+            ChangeEntityFrameworkCoreDependency(context, "Volo.Abp.EntityFrameworkCore.PostgreSql",
+                "Volo.Abp.EntityFrameworkCore.PostgreSql",
+                "AbpEntityFrameworkCorePostgreSqlModule");
+            ChangeUseSqlServer(context, "UseNpgsql");
+            break;
+
+        case DatabaseManagementSystem.Oracle:
+        case DatabaseManagementSystem.OracleDevart:
+        case DatabaseManagementSystem.SQLite:
+            // similar branches
+            break;
+    }
+}
+```
+
+Each branch combines three concerns: replace the NuGet package, replace the module `[DependsOn]` reference, and swap the `UseSqlServer` extension call to the chosen provider's equivalent.
+
+### Splicing the license code: `LicenseCodeReplaceStep`
+
+For *-pro templates, `LicenseCodeReplaceStep` is appended by the pipeline builder. It looks for the well-known placeholder `CliConsts.LicenseCodePlaceHolder` inside both `appsettings.json` and `appsettings.secrets.json` and replaces it with the value `TemplateProjectBuilder` shoved into `args.ExtraProperties["license-code"]`:
+
+```csharp
+public class LicenseCodeReplaceStep : ProjectBuildPipelineStep
+{
+    public override void Execute(ProjectBuildContext context)
+    {
+        var licenseCode = context.BuildArgs.ExtraProperties.GetOrDefault("license-code");
+
+        var appSettingsJsonFiles = context.Files.Where(f =>
+            f.Name.EndsWith(CliConsts.AppSettingsJsonFileName, StringComparison.OrdinalIgnoreCase) ||
+            f.Name.EndsWith(CliConsts.AppSettingsSecretJsonFileName, StringComparison.OrdinalIgnoreCase));
+
+        foreach (var appSettingsJson in appSettingsJsonFiles)
+        {
+            appSettingsJson.ReplaceText(CliConsts.LicenseCodePlaceHolder, licenseCode);
+        }
+    }
+}
+```
+
+The license code itself is fetched by `AbpIoApiKeyService.GetApiKeyOrNullAsync` (covered in [/cli/auth-and-licensing](/cli/auth-and-licensing)).
+
+### Switching between NuGet and local references: `ProjectReferenceReplaceStep`
+
+`ProjectReferenceReplaceStep.cs` branches on the `local-framework-ref` extra property. If the user passed `--local-framework-ref --abp-path D:\github\abp`, the step replaces every `<PackageReference Include="Volo.Abp.*">` in every `.csproj` with a relative `<ProjectReference>` to the local repository path. Otherwise it rewrites the template's branch-name version (`dev`, `rel-9.0`) to the resolved semantic version:
+
+```csharp
+if (context.BuildArgs.ExtraProperties.ContainsKey("local-framework-ref"))
+{
+    var localAbpRepoPath = context.BuildArgs.AbpGitHubLocalRepositoryPath;
+    if (string.IsNullOrWhiteSpace(localAbpRepoPath))
+    {
+        return;
+    }
+    var localVoloRepoPath = context.BuildArgs.VoloGitHubLocalRepositoryPath;
+
+    new ProjectReferenceReplacer.LocalProjectPathReferenceReplacer(
+        context,
+        context.Module?.Namespace ?? "MyCompanyName.MyProjectName",
+        localAbpRepoPath,
+        localVoloRepoPath
+    ).Run();
+}
+else
+{
+    var nugetPackageVersion = context.TemplateFile.RepositoryNugetVersion;
+    // ...
+}
+```
+
+### The terminal step: `CreateProjectResultZipStep`
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/Building/Steps/CreateProjectResultZipStep.cs` rezips the mutated `FileEntryList` back into a byte array and stores it on `context.Result.ZipContent`:
+
+```csharp
+public class CreateProjectResultZipStep : ProjectBuildPipelineStep
+{
+    public override void Execute(ProjectBuildContext context)
+    {
+        context.Result.ZipContent = CreateZipFileFromEntries(context.Files);
+    }
+
+    private static byte[] CreateZipFileFromEntries(FileEntryList entries)
+    {
+        using (var memoryStream = new MemoryStream())
+        {
+            using (var zipOutputStream = new ZipOutputStream(memoryStream))
+            {
+                // write every entry with SharpZipLib
+            }
+            return memoryStream.ToArray();
+        }
+    }
+}
+```
+
+`TemplateProjectBuilder.BuildAsync` then wraps these bytes in a `ProjectBuildResult` for `NewCommand` to extract onto disk.
+
+## The full step catalogue under `Steps/`
+
+This is the complete contents of `ProjectBuilding/Building/Steps/` at the time of writing. Each step is short — most are under 100 lines — and follows one of the patterns above.
+
+| Step | Purpose |
+| --- | --- |
+| `FileEntryListReadStep` | Unzip the template into `context.Files`. |
+| `CreateAppSettingsSecretsStep` | Seed `appsettings.secrets.json` for newer templates. |
+| `ProjectReferenceReplaceStep` | Switch between NuGet and local refs. |
+| `TemplateCodeDeleteStep` | Strip out the `#region template-only` blocks. |
+| `SolutionRenameStep` | Apply `args.SolutionName` to every renameable file. |
+| `LicenseCodeReplaceStep` | Splice the license code into appsettings files. |
+| `DatabaseManagementSystemChangeStep` | Swap the EF Core provider for app templates. |
+| `AppNoLayersDatabaseManagementSystemChangeStep` | Same, but for the single-layer template. |
+| `AppModuleDatabaseManagementSystemChangeStep` | Same, but for the module template. |
+| `AppNoLayersMigrateDatabaseChangeStep` | Adjust the migrate script for no-layer. |
+| `AppNoLayersMoveProjectsStep` | Reorganise no-layer project locations. |
+| `ChangeThemeStep` | Swap theme NuGet packages and `[DependsOn]` references. |
+| `ChangeThemeStyleStep` | Swap the theme CSS bundle reference. |
+| `ChangeDbMigratorPublicPortStep` | Adjust the DbMigrator's public URL. |
+| `ChangeLocalhostPortStep` | Randomise localhost ports. |
+| `ChangePublicAuthPortStep` | Randomise the Public AuthServer port. |
+| `CheckRedisPreRequirements` | Flag Redis as a runtime prerequisite. |
+| `ConnectionStringChangeStep` | Apply `--connection-string` to appsettings files. |
+| `ConnectionStringRenameStep` | Rename the default connection-string key (used by microservices). |
+| `MakeProxyJsonFileEmbeddedStep` | Mark generated proxy JSON as embedded resource. |
+| `MicroserviceServiceRandomPortStep` | Randomise per-microservice ports. |
+| `MoveFileStep` / `MoveFolderStep` | Plain file-system moves inside the entry list. |
+| `ProjectRenameStep` | Rename a single project within a solution. |
+| `RemoveDependencyFromPackageJsonFileStep` | Strip an npm dependency from `package.json`. |
+| `RemoveFileStep` / `RemoveFilesStep` / `RemoveFolderStep` | Drop entries from `context.Files`. |
+| `RemoveProjectFromPrometheusStep` | Drop a service from the Prometheus config. |
+| `RemoveProjectFromSolutionStep` | Drop a project line from the `.sln`. |
+| `RemoveProjectFromTyeStep` / `RenameProjectInTyeStep` | Edit `tye.yaml`. |
+| `RemoveRootFolderStep` | Unwrap the solution root when there is no sibling mobile app. |
+| `ReplaceCommonPropsStep` | Substitute placeholders in `common.props`. |
+| `ReplaceConfigureAwaitPropsStep` | Toggle ConfigureAwait analyzer. |
+| `ReplaceDependencyFromPackageJsonFileStep` | Rewrite an npm dependency version. |
+| `SolutionRenamer` | Helper invoked by `SolutionRenameStep`. |
+| `TemplateCodeDeleteStep` | Strip `#if abp-template`/`#endif` blocks. |
+| `CreateProjectResultZipStep` | Rezip into `context.Result.ZipContent`. |
+
+`ProjectBuilding/Templates/` adds a few more steps that are template-family-specific rather than generic: `MicroserviceServiceStringEncryptionStep`, `RandomizeAuthServerPassPhraseStep`, `RandomizeStringEncryptionStep`, `RemoveUnnecessaryPortsStep`, `TemplateProjectRenameStep`, `TemplateRandomSslPortStep`, `UpdateNuGetConfigStep`. These are returned from the template's own `GetCustomSteps` override.
+
+## How `TemplateProjectBuilder.BuildAsync` ties it together
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/TemplateProjectBuilder.cs` is the orchestrator. The interesting body, with the cache and analytics bookkeeping elided, is:
+
+```csharp
+public async Task<ProjectBuildResult> BuildAsync(ProjectBuildArgs args)
+{
+    var templateInfo = await GetTemplateInfoAsync(args);
+
+    NormalizeArgs(args, templateInfo);
+
+    var templateFile = await SourceCodeStore.GetAsync(
+        args.TemplateName, SourceCodeTypes.Template,
+        args.Version, args.TemplateSource,
+        args.ExtraProperties.ContainsKey(NewCommand.Options.Preview.Long),
+        trustUserVersion: args.TrustUserVersion);
+
+    ConfigureThemeOptions(args, templateFile.Version);
+
+    var apiKeyResult = await ApiKeyService.GetApiKeyOrNullAsync();
+    if (apiKeyResult?.ApiKey != null) args.ExtraProperties["api-key"] = apiKeyResult.ApiKey;
+    if (apiKeyResult?.LicenseCode != null) args.ExtraProperties["license-code"] = apiKeyResult.LicenseCode;
+
+    var context = new ProjectBuildContext(templateInfo, null, null, null, templateFile, args);
+
+    if (context.Template is AppTemplateBase appTemplateBase)
+    {
+        appTemplateBase.HasDbMigrations =
+            SemanticVersion.Parse(templateFile.Version) < new SemanticVersion(4, 3, 99);
+    }
+
+    TemplateProjectBuildPipelineBuilder.Build(context).Execute();
+
+    return new ProjectBuildResult(context.Result.ZipContent, args.SolutionName.ProjectName);
+}
+```
+
+Key observations:
+
+- `NormalizeArgs` fills in defaults from `templateInfo.DefaultDatabaseProvider` and `templateInfo.DefaultUiFramework` when the user did not pass `-d`/`-u`.
+- `SourceCodeStore.GetAsync` is the abstraction over the cached and remote template fetch — see [/cli/templates-and-bundling](/cli/templates-and-bundling) and `AbpIoSourceCodeStore.cs`.
+- `apiKeyResult` is the bridge between licensing and the pipeline. If the user is logged in and entitled, the API key and license code are stuffed into `ExtraProperties` for the steps to read.
+- `HasDbMigrations` is calculated *before* the pipeline runs because `DatabaseManagementSystemChangeStep` is constructed with it.
+
+## Custom steps via `TemplateInfo.GetCustomSteps`
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/Building/TemplateInfo.cs` exposes a virtual hook:
+
+```csharp
+public virtual IEnumerable<ProjectBuildPipelineStep> GetCustomSteps(ProjectBuildContext context)
+{
+    var steps = new List<ProjectBuildPipelineStep>();
+    return steps;
+}
+```
+
+Subclasses override this to insert template-specific transformations. For example, `AppTemplateBase` (under `ProjectBuilding/Templates/App/AppTemplateBase.cs`) appends steps that change the DbMigrator's port, configure separated AuthServer environments, and inject the React/Angular environment files. The custom steps run *after* `FileEntryListReadStep` and *before* the generic rename/database/zip phases, which gives them access to the unmodified file list.
+
+## Module and package builders
+
+The non-template builders share `ProjectBuildContext` but use a different pipeline factory:
+
+- `ModuleProjectBuildPipelineBuilder.cs` is used by `GetSourceCommand`. It still starts with `FileEntryListReadStep` and ends with `CreateProjectResultZipStep`, but the middle is limited to renames and project-reference fixups — no DBMS swap or license splice.
+- `NugetPackageProjectBuildPipelineBuilder.cs` and `NpmPackageProjectBuildPipelineBuilder.cs` produce a tiny pipeline that just unpacks and rezips a single package source.
+
+Because `ProjectBuildContext` carries `Module`, `NugetPackage`, and `NpmPackage` slots alongside `Template`, the same step base class is reused — for instance `ProjectRenameStep` works identically whether the input is a full solution or a single-package source.
+
+## What this enables for downstream commands
+
+The pipeline is consumed by exactly the commands that need to materialise source code from a template:
+
+- `NewCommand` → `TemplateProjectBuilder` (see [/cli/templates-and-bundling](/cli/templates-and-bundling) for the command surface).
+- `GetSourceCommand` → `ModuleProjectBuilder`.
+- `AddModuleCommand` → indirectly, via `SolutionModuleAdder.AddMissingProjectsToSolutionAsync` which can spawn `NewCommand` to scaffold a fresh module (see [/cli/project-modification](/cli/project-modification)).
+
+Because every transformation lives on a `ProjectBuildContext` rather than touching disk, the same machinery can be reused by ABP Studio and other CLI front-ends that want to produce templates in-memory and post them to a different sink. The only place the pipeline writes to disk is *outside* the pipeline — `NewCommand.ExtractProjectZip` is the one that unpacks `result.ZipContent` to `args.OutputFolder`.
+
+## Cross-references
+
+- The command that drives the pipeline: [/cli/templates-and-bundling](/cli/templates-and-bundling).
+- The DI primitives that make the steps cheap to construct: [/cli/cli-core-abstractions](/cli/cli-core-abstractions).
+- The startup template metadata each step branches on: [/templates/overview](/templates/overview).
+- The Bundle pipeline that runs *after* `abp new` in `NewCommand.ExecuteAsync`: [/ui-mvc/bundling](/ui-mvc/bundling).

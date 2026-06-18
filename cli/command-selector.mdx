@@ -1,0 +1,325 @@
+---
+title: "Command Selector, Argv Dispatch, and Help Routing Layer"
+sidebarTitle: "Command Selector"
+description: "How the ABP CLI maps the parsed command verb to an IConsoleCommand type via AbpCliOptions.Commands and routes help requests through HelpCommand."
+---
+
+The ABP Framework CLI uses a tiny indirection layer between the parsed `CommandLineArgs` and the concrete command class that executes the verb. This page walks `Volo.Abp.Cli.Commands.CommandSelector`, the `AbpCliOptions.Commands` registry that backs it, the `HelpCommand` fallback that catches everything unknown, and the `HideFromCommandList` attribute that controls which verbs appear in `abp help`. It also enumerates every command class shipped in `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/` so you can see exactly which `IConsoleCommand` ends up being resolved for each `abp <verb>` invocation.
+
+## The `ICommandSelector` contract
+
+The selector is intentionally one method wide. `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/ICommandSelector.cs` declares a single `Select(CommandLineArgs)` that returns a `System.Type` — *not* an instance. That keeps the selector free of any lifecycle concerns and lets `CliService` resolve the type inside a child `IServiceScope` just before invocation:
+
+```csharp
+public interface ICommandSelector
+{
+    Type Select(CommandLineArgs commandLineArgs);
+}
+```
+
+The default implementation lives next to it in `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/CommandSelector.cs` and is registered as `ITransientDependency`. It does two things: it falls back to `HelpCommand` when no verb was supplied, and it consults `AbpCliOptions.Commands` (a case-insensitive `Dictionary<string, Type>`) for every other case, again returning `typeof(HelpCommand)` when the verb is unknown.
+
+```csharp
+public class CommandSelector : ICommandSelector, ITransientDependency
+{
+    protected AbpCliOptions Options { get; }
+
+    public CommandSelector(IOptions<AbpCliOptions> options)
+    {
+        Options = options.Value;
+    }
+
+    public Type Select(CommandLineArgs commandLineArgs)
+    {
+        if (commandLineArgs.Command.IsNullOrWhiteSpace())
+        {
+            return typeof(HelpCommand);
+        }
+
+        return Options.Commands.GetOrDefault(commandLineArgs.Command)
+               ?? typeof(HelpCommand);
+    }
+}
+```
+
+Because `HelpCommand` is the *only* fallback, the CLI never throws on an unrecognised verb — it prints the command list and exits with code `0`. Users see "There is no command named X" only when they explicitly type `abp help X` for an unknown `X`, which is handled inside `HelpCommand.ExecuteAsync` itself (see [Help routing](#help-routing-via-helpcommand)).
+
+## The `AbpCliOptions.Commands` registry
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/AbpCliOptions.cs` exposes the `Commands` dictionary that the selector reads. It is created in the constructor with `StringComparer.OrdinalIgnoreCase` so `abp NEW` and `abp new` resolve to the same entry:
+
+```csharp
+public class AbpCliOptions
+{
+    public Dictionary<string, Type> Commands { get; }
+
+    public List<string> DisabledModulesToAddToSolution { get; set; }
+
+    public bool CacheTemplates { get; set; } = true;
+
+    public string ToolName { get; set; } = "CLI";
+
+    public bool AlwaysHideExternalCommandOutput { get; set; }
+
+    public AbpCliOptions()
+    {
+        Commands = new Dictionary<string, Type>(StringComparer.OrdinalIgnoreCase);
+        DisabledModulesToAddToSolution = new();
+    }
+}
+```
+
+There is no auto-discovery of command classes by reflection or attribute scanning. Every verb has to be added to the dictionary in `AbpCliCoreModule.ConfigureServices`, which means the registry is grep-friendly and trivial to extend from downstream modules — you `Configure<AbpCliOptions>` and add another entry. See [/cli/cli-core-abstractions](/cli/cli-core-abstractions) for the wider options surface.
+
+## Registration in `AbpCliCoreModule`
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/AbpCliCoreModule.cs` is the single source of truth for the default mapping. Each command class exposes a `public const string Name` and a `static string GetShortDescription()` method, and the module configures the dictionary with one line per command:
+
+```csharp
+Configure<AbpCliOptions>(options =>
+{
+    options.Commands[HelpCommand.Name] = typeof(HelpCommand);
+    options.Commands[PromptCommand.Name] = typeof(PromptCommand);
+    options.Commands[NewCommand.Name] = typeof(NewCommand);
+    options.Commands[GetSourceCommand.Name] = typeof(GetSourceCommand);
+    options.Commands[UpdateCommand.Name] = typeof(UpdateCommand);
+    options.Commands[AddPackageCommand.Name] = typeof(AddPackageCommand);
+    options.Commands[AddModuleCommand.Name] = typeof(AddModuleCommand);
+    options.Commands[ListModulesCommand.Name] = typeof(ListModulesCommand);
+    options.Commands[ListTemplatesCommand.Name] = typeof(ListTemplatesCommand);
+    options.Commands[LoginCommand.Name] = typeof(LoginCommand);
+    options.Commands[LoginInfoCommand.Name] = typeof(LoginInfoCommand);
+    options.Commands[LogoutCommand.Name] = typeof(LogoutCommand);
+    options.Commands[GenerateProxyCommand.Name] = typeof(GenerateProxyCommand);
+    options.Commands[RemoveProxyCommand.Name] = typeof(RemoveProxyCommand);
+    options.Commands[SuiteCommand.Name] = typeof(SuiteCommand);
+    options.Commands[SwitchToPreviewCommand.Name] = typeof(SwitchToPreviewCommand);
+    options.Commands[SwitchToStableCommand.Name] = typeof(SwitchToStableCommand);
+    options.Commands[SwitchToNightlyCommand.Name] = typeof(SwitchToNightlyCommand);
+    options.Commands[SwitchToPreRcCommand.Name] = typeof(SwitchToPreRcCommand);
+    options.Commands[SwitchToLocal.Name] = typeof(SwitchToLocal);
+    options.Commands[TranslateCommand.Name] = typeof(TranslateCommand);
+    options.Commands[BuildCommand.Name] = typeof(BuildCommand);
+    options.Commands[BundleCommand.Name] = typeof(BundleCommand);
+    options.Commands[CreateMigrationAndRunMigratorCommand.Name] = typeof(CreateMigrationAndRunMigratorCommand);
+    options.Commands[InstallLibsCommand.Name] = typeof(InstallLibsCommand);
+    options.Commands[CleanCommand.Name] = typeof(CleanCommand);
+    options.Commands[CliCommand.Name] = typeof(CliCommand);
+    options.Commands[ClearDownloadCacheCommand.Name] = typeof(ClearDownloadCacheCommand);
+    options.Commands[RecreateInitialMigrationCommand.Name] = typeof(RecreateInitialMigrationCommand);
+    options.Commands[GenerateRazorPage.Name] = typeof(GenerateRazorPage);
+    options.Commands[McpCommand.Name] = typeof(McpCommand);
+
+    options.DisabledModulesToAddToSolution.Add("Volo.Abp.LeptonXTheme.Pro");
+    options.DisabledModulesToAddToSolution.Add("Volo.Abp.LeptonXTheme.Lite");
+});
+```
+
+A few things to notice:
+
+- The keys are read from `const` fields on the command classes (for example `NewCommand.Name = "new"`), so a typo in the registration is a compile error rather than a silent miss.
+- The same dictionary is consulted both by `CommandSelector.Select` *and* by `HelpCommand.ExecuteAsync` when computing the targeted help text, so the registration is the canonical "what commands exist" list.
+- `DisabledModulesToAddToSolution` lives on the same options object purely for convenience — it has nothing to do with command dispatch and is read by `AddModuleCommand` to refuse some module names.
+
+## Help routing via `HelpCommand`
+
+`framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/HelpCommand.cs` is the bottom of the dispatch chain. It is constructed with `IServiceScopeFactory` and `IOptions<AbpCliOptions>`, and the executor branches on whether the user asked about a specific verb:
+
+```csharp
+public Task ExecuteAsync(CommandLineArgs commandLineArgs)
+{
+    if (string.IsNullOrWhiteSpace(commandLineArgs.Target))
+    {
+        Logger.LogInformation(GetUsageInfo());
+        return Task.CompletedTask;
+    }
+
+    if (!AbpCliOptions.Commands.ContainsKey(commandLineArgs.Target))
+    {
+        Logger.LogWarning($"There is no command named {commandLineArgs.Target}.");
+        Logger.LogInformation(GetUsageInfo());
+        return Task.CompletedTask;
+    }
+
+    var commandType = AbpCliOptions.Commands[commandLineArgs.Target];
+
+    using (var scope = ServiceScopeFactory.CreateScope())
+    {
+        var command = (IConsoleCommand)scope.ServiceProvider.GetRequiredService(commandType);
+        Logger.LogInformation(command.GetUsageInfo());
+    }
+
+    return Task.CompletedTask;
+}
+```
+
+The "list every command" branch is `HelpCommand.GetUsageInfo`, which iterates the registry, skips entries marked `HideFromCommandList`, and reflects each command type's static `GetShortDescription` method to print one line per verb:
+
+```csharp
+foreach (var command in AbpCliOptions.Commands.ToArray().Where(NotHiddenFromCommandList).OrderBy(x => x.Key))
+{
+    var method = command.Value.GetMethod("GetShortDescription", BindingFlags.Static | BindingFlags.Public);
+    if (method == null)
+    {
+        continue;
+    }
+
+    var shortDescription = (string) method.Invoke(null, null);
+
+    sb.Append("    > ");
+    sb.Append(command.Key);
+    sb.Append(string.IsNullOrWhiteSpace(shortDescription) ? "" : ":");
+    sb.Append(" ");
+    sb.AppendLine(shortDescription);
+}
+```
+
+`NotHiddenFromCommandList` inspects the command `Type` for the marker attribute `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/Internal/HideFromCommandList.cs`:
+
+```csharp
+public class HideFromCommandList : Attribute
+{}
+```
+
+Any command class that wants to remain registered (so `abp <verb>` still works) but hidden from the public listing simply decorates itself with `[HideFromCommandList]`. The targeted help (`abp help <verb>`) still works for hidden commands because it does not consult the attribute.
+
+## Dispatch flow from `CliService`
+
+The selector is consumed by `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/CliService.cs:RunInternalAsync`, which is the only caller in non-prompt and non-batch mode. The flow is: parse args → ask the selector for a `Type` → open a scope → resolve `IConsoleCommand` from that scope → `await ExecuteAsync`. The scope is critical because most commands inject scoped services (HTTP clients, telemetry, transient infrastructure).
+
+```csharp
+private async Task RunInternalAsync(CommandLineArgs commandLineArgs)
+{
+    var commandType = CommandSelector.Select(commandLineArgs);
+
+    using (var scope = ServiceScopeFactory.CreateScope())
+    {
+        var command = (IConsoleCommand)scope.ServiceProvider.GetRequiredService(commandType);
+        await command.ExecuteAsync(commandLineArgs);
+    }
+}
+```
+
+There are two special cases inside `RunAsync` that short-circuit the selector entirely: `prompt` enters an interactive `Console.ReadLine` loop, and `batch` reads a file of newline-separated commands and feeds each line back through `CommandLineArgumentParser`. Both ultimately funnel into the same `RunInternalAsync`, so the selector still picks the type for each individual command — it just happens many times in one process.
+
+## The `IConsoleCommand` contract
+
+Every command type that the selector can hand back implements `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/IConsoleCommand.cs`:
+
+```csharp
+public interface IConsoleCommand
+{
+    Task ExecuteAsync(CommandLineArgs commandLineArgs);
+
+    string GetUsageInfo();
+}
+```
+
+`ExecuteAsync` is the entry point invoked by `CliService`; `GetUsageInfo` is the multi-line block printed by `abp help <verb>`. The static `GetShortDescription` used by the top-level help is a *convention*, not part of the interface — that's why `HelpCommand.GetUsageInfo` reaches for it via reflection and silently skips any command type that does not declare it.
+
+## Every registered command class
+
+The table below lists every entry the default `AbpCliCoreModule` puts into `AbpCliOptions.Commands`. The "Source" column is relative to `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/`. Where a verb is documented on its own page in this section it is linked.
+
+| Verb | Class | Source | Short description |
+| --- | --- | --- | --- |
+| `help` | `HelpCommand` | `HelpCommand.cs` | Show command line help. Write \``abp help <command>`\` |
+| `prompt` | `PromptCommand` | `PromptCommand.cs` | Enter the interactive prompt loop |
+| `new` | `NewCommand` | `NewCommand.cs` | Generate a new solution based on the ABP startup templates |
+| `get-source` | `GetSourceCommand` | `GetSourceCommand.cs` | Download the source code of a given module |
+| `update` | `UpdateCommand` | `UpdateCommand.cs` | Update ABP-related NuGet and NPM packages in a solution |
+| `add-package` | `AddPackageCommand` | `AddPackageCommand.cs` | Add an ABP package reference to a project |
+| `add-module` | `AddModuleCommand` | `AddModuleCommand.cs` | Add a multi-package ABP module to a solution |
+| `list-modules` | `ListModulesCommand` | `ListModulesCommand.cs` | List available pre-built application modules |
+| `list-templates` | `ListTemplatesCommand` | `ListTemplatesCommand.cs` | List available solution templates |
+| `login` | `LoginCommand` | `LoginCommand.cs` | Sign in to `account.abp.io` |
+| `login-info` | `LoginInfoCommand` | `LoginInfoCommand.cs` | Show the current login info |
+| `logout` | `LogoutCommand` | `LogoutCommand.cs` | Sign out from `account.abp.io` |
+| `generate-proxy` | `GenerateProxyCommand` | `GenerateProxyCommand.cs` | Generate client service proxies (covered in [/cli/service-proxying](/cli/service-proxying)) |
+| `remove-proxy` | `RemoveProxyCommand` | `RemoveProxyCommand.cs` | Remove previously generated proxies |
+| `suite` | `SuiteCommand` | `SuiteCommand.cs` | Install, update, and run the ABP Suite |
+| `switch-to-preview` | `SwitchToPreviewCommand` | `SwitchToPreviewCommand.cs` | Switch the solution to the latest preview release |
+| `switch-to-stable` | `SwitchToStableCommand` | `SwitchToStableCommand.cs` | Switch the solution to the latest stable release |
+| `switch-to-nightly` | `SwitchToNightlyCommand` | `SwitchToNightlyCommand.cs` | Switch the solution to nightly builds |
+| `switch-to-pre-rc` | `SwitchToPreRcCommand` | `SwitchToPreRcCommand.cs` | Switch to the pre-RC feed |
+| `switch-to-local` | `SwitchToLocal` | `SwitchToLocalCommand.cs` | Switch project references to local repository paths |
+| `translate` | `TranslateCommand` | `TranslateCommand.cs` | Localization helper (see [/cli/translate-command](/cli/translate-command)) |
+| `build` | `BuildCommand` | `BuildCommand.cs` | Build a repository or solution (see [/cli/project-building](/cli/project-building)) |
+| `bundle` | `BundleCommand` | `BundleCommand.cs` | Bundle Blazor styles and scripts (see [/cli/templates-and-bundling](/cli/templates-and-bundling)) |
+| `create-migration-and-run-migrator` | `CreateMigrationAndRunMigratorCommand` | `CreateMigrationAndRunMigratorCommand.cs` | EF Core migration helper |
+| `install-libs` | `InstallLibsCommand` | `InstallLibsCommand.cs` | Restore client-side libs (see [/cli/install-libs](/cli/install-libs)) |
+| `clean` | `CleanCommand` | `CleanCommand.cs` | Run `dotnet clean` and remove `bin`/`obj` |
+| `cli` | `CliCommand` | `CliCommand.cs` | Update or remove the `Volo.Abp.Cli` tool itself |
+| `clear-download-cache` | `ClearDownloadCacheCommand` | `ClearDownloadCacheCommand.cs` | Empty `~/.abp/templates` |
+| `recreate-initial-migration` | `RecreateInitialMigrationCommand` | `Internal/RecreateInitialMigrationCommand.cs` | Hidden helper used after `abp new` |
+| `generate-razor-page` | `GenerateRazorPage` | `GenerateRazorPage.cs` | Code-generate a Razor page |
+| `mcp` | `McpCommand` | `McpCommand.cs` | MCP server entry point (see [/cli/mcp-command](/cli/mcp-command)) |
+
+`RecreateInitialMigrationCommand` lives under `Commands/Internal/` and is decorated with `[HideFromCommandList]` so it does not show up in `abp help` even though `abp recreate-initial-migration` still works.
+
+## Adding a new command from a downstream module
+
+Because the registry is a plain `Configure<AbpCliOptions>` block, extending the CLI from a module is straightforward. The custom command needs to:
+
+1. Implement `IConsoleCommand` and be discoverable by the conventional DI scan (so a `[ITransientDependency]` marker or matching name).
+2. Expose `public const string Name` so callers and tests can reference it without magic strings.
+3. (Optional) Expose `static string GetShortDescription()` if it should appear in `abp help`.
+4. (Optional) Decorate with `[HideFromCommandList]` if it should be invokable but hidden.
+
+A consuming module then registers it:
+
+```csharp
+[DependsOn(typeof(AbpCliCoreModule))]
+public class MyCustomCliModule : AbpModule
+{
+    public override void ConfigureServices(ServiceConfigurationContext context)
+    {
+        Configure<AbpCliOptions>(options =>
+        {
+            options.Commands[MyCustomCommand.Name] = typeof(MyCustomCommand);
+        });
+    }
+}
+```
+
+Because `AbpCliOptions.Commands` is a `Dictionary`, re-registering an existing key (e.g. `NewCommand.Name`) replaces the type — useful for swapping the default `new` behaviour without subclassing `CliService`.
+
+## Why no command tree?
+
+Many CLI frameworks model verbs as a tree with sub-commands. ABP deliberately stays flat: the `CommandLineArgs.Command` field is a single string and the selector is a one-level dictionary lookup. Multi-word commands such as `add-package` and `login-info` are just hyphenated names in the registry. The two-level appearance of `abp cli update` is implemented inside `CliCommand.ExecuteAsync` itself — it inspects `commandLineArgs.Target` and branches:
+
+```csharp
+switch (operationType)
+{
+    case "":
+    case null:
+        _cmdHelper.RunCmd("abp");
+        break;
+
+    case "update":
+        await UpdateCliAsync(version, preview);
+        break;
+
+    case "remove":
+        RemoveCli();
+        break;
+}
+```
+
+So from the selector's point of view there is exactly one verb, `cli`, and the second word is just `Target` data. This keeps the dispatch layer tiny and means every command can choose its own sub-language without colliding with peers.
+
+## Cross-cutting interactions
+
+- `RunPromptAsync` and `RunBatchAsync` in `CliService.cs` re-parse strings and call `RunInternalAsync`, so they go through the selector once per command. The `prompt` and `batch` verbs themselves are *not* in `AbpCliOptions.Commands` — they are short-circuited in `RunAsync` before the selector is asked. This is why `abp help prompt` reports "There is no command named prompt".
+- `McpCommand` skips the banner and version-check log lines in `CliService.RunAsync` (`isMcpCommand` flag) so that JSON-RPC over stdout is not corrupted, but it still goes through `CommandSelector` like any other verb.
+- The MCP tool list exposed by `McpServerService` mirrors the same dictionary — see [/cli/mcp-command](/cli/mcp-command).
+
+## Summary
+
+The dispatch layer is three files:
+
+- `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/ICommandSelector.cs` — the type-only contract.
+- `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/CommandSelector.cs` — the dictionary lookup.
+- `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/HelpCommand.cs` — the fallback and the targeted-help renderer.
+
+Everything else — the actual commands — is reachable from `AbpCliOptions.Commands`. For the full bootstrap path, see [/cli/program-and-bootstrap](/cli/program-and-bootstrap); for the shared DI primitives used by every command, see [/cli/cli-core-abstractions](/cli/cli-core-abstractions).

@@ -1,0 +1,553 @@
+---
+title: "Feature Management Module — Tenant Feature Toggles"
+sidebarTitle: "Feature Mgmt"
+description: "Volo.Abp.FeatureManagement persists Default, Configuration, Edition and Tenant feature values, chains providers in IFeatureManager, exposes app service."
+---
+
+The Feature Management module under `modules/feature-management/src/` is ABP Framework's persistent counterpart to the in-memory `Volo.Abp.Features` runtime described in [Features and Feature Management](/security/features-and-feature-management). The feature runtime answers "is feature X enabled for the current request?"; this module answers "what value has an administrator persisted for feature X against tenant Y or edition Z?" and lets that value flow back through `IFeatureManager`, an `IFeatureManagementProvider` chain and the `FeatureAppService` REST endpoint exposed by `Volo.Abp.FeatureManagement.HttpApi`.
+
+The module is layered so that the same `FeatureValue` aggregate root surfaces through EF Core (`Volo.Abp.FeatureManagement.EntityFrameworkCore`), MongoDB (`Volo.Abp.FeatureManagement.MongoDB`), Razor Pages (`Volo.Abp.FeatureManagement.Web`) and Blazor (`Volo.Abp.FeatureManagement.Blazor`). The host's `AbpFeatureManagementDomainModule` chains four providers in a strict order — `Default` → `Configuration` → `Edition` → `Tenant` — so a value set at a tenant overrides an edition default, which overrides an `appsettings.json` value, which overrides the static `DefaultValue` declared in code. This page walks through that chain and the storage that backs it.
+
+## Project layout
+
+The `modules/feature-management/src/` folder is split into the standard ABP layered packages:
+
+```
+modules/feature-management/src/
+├── Volo.Abp.FeatureManagement.Domain.Shared/         AbpFeatureManagementDbProperties, consts
+├── Volo.Abp.FeatureManagement.Domain/                FeatureValue aggregate, providers, store
+├── Volo.Abp.FeatureManagement.Application.Contracts/ IFeatureAppService + DTOs + permissions
+├── Volo.Abp.FeatureManagement.Application/           FeatureAppService implementation
+├── Volo.Abp.FeatureManagement.HttpApi/               FeaturesController (api/feature-management/*)
+├── Volo.Abp.FeatureManagement.HttpApi.Client/        Dynamic C# proxies
+├── Volo.Abp.FeatureManagement.EntityFrameworkCore/   FeatureManagementDbContext, EF repos
+├── Volo.Abp.FeatureManagement.MongoDB/               FeatureManagementMongoDbContext, Mongo repos
+├── Volo.Abp.FeatureManagement.Web/                   Razor Pages admin modal
+├── Volo.Abp.FeatureManagement.Blazor[/Server/WebAssembly]/  Blazor admin component
+└── Volo.Abp.FeatureManagement.Installer/             NuGet meta-package
+```
+
+The folder layout follows the same DDD packaging convention used by the [Permission Management](/modules/permission-management) and [Setting Management](/modules/setting-management) modules, with the same `*.Domain.Shared` / `*.Domain` / `*.Application(.Contracts)` / `*.HttpApi(.Client)` / `*.EntityFrameworkCore` / `*.MongoDB` / `*.Web` axes.
+
+## The FeatureValue aggregate
+
+`Volo.Abp.FeatureManagement.Domain/Volo/Abp/FeatureManagement/FeatureValue.cs` defines the single persistent aggregate root. It is intentionally minimal: a name, a serialized string value, and the `(ProviderName, ProviderKey)` pair that identifies *who* the value was set for.
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Domain/Volo/Abp/FeatureManagement/FeatureValue.cs
+public class FeatureValue : Entity<Guid>, IAggregateRoot<Guid>
+{
+    [NotNull] public virtual string Name { get; protected set; }
+    [NotNull] public virtual string Value { get; internal set; }
+    [NotNull] public virtual string ProviderName { get; protected set; }
+    [CanBeNull] public virtual string ProviderKey { get; protected set; }
+
+    public FeatureValue(
+        Guid id,
+        [NotNull] string name,
+        [NotNull] string value,
+        [NotNull] string providerName,
+        [CanBeNull] string providerKey)
+    {
+        Id = id;
+        Name = Check.NotNullOrWhiteSpace(name, nameof(name));
+        Value = Check.NotNullOrWhiteSpace(value, nameof(value));
+        ProviderName = Check.NotNullOrWhiteSpace(providerName, nameof(providerName));
+        ProviderKey = providerKey;
+    }
+}
+```
+
+The aggregate is treated as a unit of (`Name`, `ProviderName`, `ProviderKey`) and the EF mapping in `FeatureManagementDbContextModelCreatingExtensions.ConfigureFeatureManagement` declares a unique index on that triple — see [Entity Framework Core](/data/entity-framework-core) for how `ConfigureByConvention()` and `ApplyObjectExtensionMappings()` add audit columns and extension support around it. The `Value` setter is `internal` so that only the `FeatureManagementStore` can mutate it without going through the aggregate constructor.
+
+<Note>
+`FeatureValue` deliberately stores `Value` as `string`. The conversion to/from typed values such as `bool`, `int` or enum is performed by `IFeatureValueValidator` / `IFeatureCheckerProvider` in the `Volo.Abp.Features` runtime — see [Features and Feature Management](/security/features-and-feature-management).
+</Note>
+
+## Static feature definitions persisted to the database
+
+`FeatureDefinitionRecord` and `FeatureGroupDefinitionRecord` (in the same `Volo.Abp.FeatureManagement.Domain` project) mirror the static `FeatureDefinition` / `FeatureGroupDefinition` types declared by `IFeatureDefinitionProvider` implementations. The `FeatureDynamicInitializer` registered by `AbpFeatureManagementDomainModule.OnApplicationInitializationAsync` walks every `IFeatureDefinitionProvider`, serializes its features via `IFeatureDefinitionSerializer` and saves the records through `IFeatureDefinitionRecordRepository`. The behaviour is governed by `FeatureManagementOptions.SaveStaticFeaturesToDatabase` (default `true`) and `IsDynamicFeatureStoreEnabled` (default `false`).
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Domain/Volo/Abp/FeatureManagement/FeatureManagementOptions.cs
+public class FeatureManagementOptions
+{
+    public ITypeList<IFeatureManagementProvider> Providers { get; }
+    public Dictionary<string, string> ProviderPolicies { get; }
+
+    public bool SaveStaticFeaturesToDatabase { get; set; } = true;
+    public bool IsDynamicFeatureStoreEnabled { get; set; }
+
+    public FeatureManagementOptions()
+    {
+        Providers = new TypeList<IFeatureManagementProvider>();
+        ProviderPolicies = new Dictionary<string, string>();
+    }
+}
+```
+
+The `AbpFeatureManagementDomainModule.ConfigureServices` method registers the four built-in providers in a specific order. Because `FeatureManager` reverses the list before evaluating, the *last* provider added is the *first* one consulted:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Domain/Volo/Abp/FeatureManagement/AbpFeatureManagementDomainModule.cs
+Configure<FeatureManagementOptions>(options =>
+{
+    options.Providers.Add<DefaultValueFeatureManagementProvider>();
+    options.Providers.Add<ConfigurationFeatureManagementProvider>();
+    options.Providers.Add<EditionFeatureManagementProvider>();
+
+    //TODO: Should be moved to the Tenant Management module
+    options.Providers.Add<TenantFeatureManagementProvider>();
+    options.ProviderPolicies[TenantFeatureValueProvider.ProviderName] = "AbpTenantManagement.Tenants.ManageFeatures";
+});
+```
+
+The `ProviderPolicies` dictionary maps each provider name to the [permission](/security/permissions) that gates editing values for that provider. The tenant provider is pre-mapped to `AbpTenantManagement.Tenants.ManageFeatures` defined by the [Tenant Management module](/modules/tenant-management).
+
+## The provider chain
+
+`IFeatureManagementProvider` is the abstraction that every value source plugs into. Its three operations — get, set and clear — all take a `FeatureDefinition` plus a `providerKey` (e.g. a tenant id, an edition id, or `null` for global):
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Domain/Volo/Abp/FeatureManagement/IFeatureManagementProvider.cs
+public interface IFeatureManagementProvider
+{
+    string Name { get; }
+
+    bool Compatible(string providerName);
+
+    Task<IAsyncDisposable> HandleContextAsync(string providerName, string providerKey);
+
+    Task<string> GetOrNullAsync([NotNull] FeatureDefinition feature, [CanBeNull] string providerKey);
+    Task SetAsync([NotNull] FeatureDefinition feature, [NotNull] string value, [CanBeNull] string providerKey);
+    Task ClearAsync([NotNull] FeatureDefinition feature, [CanBeNull] string providerKey);
+}
+```
+
+The abstract base `FeatureManagementProvider` delegates `GetOrNullAsync` / `SetAsync` / `ClearAsync` to an `IFeatureManagementStore`, while `Compatible` and `HandleContextAsync` let a provider widen the set of names it answers to (used by `EditionFeatureManagementProvider` so an edition value also covers a tenant lookup).
+
+### DefaultValueFeatureManagementProvider
+
+The default provider in `DefaultValueFeatureManagementProvider.cs` is read-only: it returns `feature.DefaultValue` declared by the static `IFeatureDefinitionProvider`. Attempting to call `SetAsync` throws an `AbpException` because the default is part of source code:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Domain/Volo/Abp/FeatureManagement/DefaultValueFeatureManagementProvider.cs
+public class DefaultValueFeatureManagementProvider : IFeatureManagementProvider, ISingletonDependency
+{
+    public string Name => DefaultValueFeatureValueProvider.ProviderName;
+
+    public virtual Task<string> GetOrNullAsync(FeatureDefinition feature, string providerKey)
+    {
+        return Task.FromResult(feature.DefaultValue);
+    }
+
+    public virtual Task SetAsync(FeatureDefinition feature, string value, string providerKey)
+    {
+        throw new AbpException($"Can not set default value of a feature. ...");
+    }
+}
+```
+
+### ConfigurationFeatureManagementProvider
+
+`ConfigurationFeatureManagementProvider` reads from `IConfiguration` using the prefix declared by `ConfigurationFeatureValueProvider.ConfigurationNamePrefix`. It is the natural place to hard-code "host machine" overrides in `appsettings.json`:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Domain/Volo/Abp/FeatureManagement/ConfigurationFeatureManagementProvider.cs
+public virtual Task<string> GetOrNullAsync(FeatureDefinition feature, string providerKey)
+{
+    return Task.FromResult(
+        Configuration[ConfigurationFeatureValueProvider.ConfigurationNamePrefix + feature.Name]);
+}
+
+public virtual Task SetAsync(FeatureDefinition feature, string value, string providerKey)
+{
+    throw new AbpException($"Can not set a feature value to the application configuration.");
+}
+```
+
+Like the default provider it is read-only — settings come from `appsettings.json` / environment variables and `SetAsync` throws.
+
+### EditionFeatureManagementProvider
+
+The edition provider in `EditionFeatureManagementProvider.cs` is the most subtle. It honours two cases: a direct edition id supplied as `providerKey`, or an indirect lookup that maps the current tenant id (or a tenant id passed as `providerKey` when the caller is editing tenant features) to its `EditionId` through `ITenantStore`:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Domain/Volo/Abp/FeatureManagement/EditionFeatureManagementProvider.cs
+public override bool Compatible(string providerName)
+{
+    CurrentCompatibleProviderName = providerName;
+    return providerName == TenantFeatureValueProvider.ProviderName || base.Compatible(providerName);
+}
+
+protected virtual async Task<Guid?> FindEditionIdAsync(string providerKey)
+{
+    if (Guid.TryParse(providerKey, out var parsedEditionOrTenantId))
+    {
+        if (CurrentCompatibleProviderName == TenantFeatureValueProvider.ProviderName)
+        {
+            var tenant = await TenantStore.FindAsync(parsedEditionOrTenantId);
+            if (tenant != null) return tenant?.EditionId;
+        }
+        return parsedEditionOrTenantId;
+    }
+
+    if (CurrentTenant.Id.HasValue)
+    {
+        var tenant = await TenantStore.FindAsync(CurrentTenant.GetId());
+        if (tenant != null) return tenant?.EditionId;
+    }
+
+    return PrincipalAccessor.Principal?.FindEditionId();
+}
+```
+
+This is what lets a SaaS product define a single "Pro" edition feature value and have every tenant attached to that edition inherit it transparently. The bridge to [Tenant Management](/modules/tenant-management) is `ITenantStore.FindAsync(tenantId)` returning a `TenantConfiguration` whose `EditionId` is then used to query `FeatureValue` rows whose `ProviderName == "E"` and `ProviderKey == editionId`.
+
+### TenantFeatureManagementProvider
+
+The tenant provider in `TenantFeatureManagementProvider.cs` is the most write-heavy. Its `HandleContextAsync` switches `ICurrentTenant` to the requested tenant before reading/writing — so domain audit fields and tenant-scoped queries see the right tenant:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Domain/Volo/Abp/FeatureManagement/TenantFeatureManagementProvider.cs
+public override Task<IAsyncDisposable> HandleContextAsync(string providerName, string providerKey)
+{
+    if (providerName == Name && !providerKey.IsNullOrWhiteSpace())
+    {
+        if (Guid.TryParse(providerKey, out var tenantId))
+        {
+            var disposable = CurrentTenant.Change(tenantId);
+            return Task.FromResult<IAsyncDisposable>(new AsyncDisposeFunc(() =>
+            {
+                disposable.Dispose();
+                return Task.CompletedTask;
+            }));
+        }
+    }
+    return base.HandleContextAsync(providerName, providerKey);
+}
+
+protected override Task<string> NormalizeProviderKeyAsync(string providerKey)
+{
+    if (providerKey != null) return Task.FromResult(providerKey);
+    return Task.FromResult(CurrentTenant.Id?.ToString());
+}
+```
+
+When `providerKey` is `null` the provider falls back to `ICurrentTenant.Id` so an in-tenant request can read its own feature values without explicitly passing the id. See [Multi-Tenancy Overview](/multi-tenancy/overview) for how `ICurrentTenant` is populated.
+
+## IFeatureManager — the orchestrator
+
+`FeatureManager` (`Volo.Abp.FeatureManagement.Domain/Volo/Abp/FeatureManagement/FeatureManager.cs`) is the single facade that walks the provider list. It is registered as `ISingletonDependency` and resolves the configured providers lazily out of the DI container:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Domain/Volo/Abp/FeatureManagement/FeatureManager.cs
+private readonly Lazy<List<IFeatureManagementProvider>> _lazyProviders;
+
+public FeatureManager(
+    IOptions<FeatureManagementOptions> options,
+    IServiceProvider serviceProvider,
+    IFeatureDefinitionManager featureDefinitionManager,
+    IStringLocalizerFactory stringLocalizerFactory)
+{
+    FeatureDefinitionManager = featureDefinitionManager;
+    StringLocalizerFactory = stringLocalizerFactory;
+    Options = options.Value;
+
+    _lazyProviders = new Lazy<List<IFeatureManagementProvider>>(
+        () => Options.Providers
+                .Select(c => serviceProvider.GetRequiredService(c) as IFeatureManagementProvider)
+                .ToList(),
+        true);
+}
+```
+
+### Read path
+
+`GetOrNullWithProviderAsync` is the core read method. It reverses the `Providers` list — so `Tenant` is asked first, then `Edition`, then `Configuration`, then `Default` — and returns the first non-null value together with a `FeatureValueProviderInfo` describing which provider supplied it:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Domain/Volo/Abp/FeatureManagement/FeatureManager.cs
+var providers = Enumerable.Reverse(Providers);
+if (providerName != null)
+{
+    providers = providers.SkipWhile(c => c.Name != providerName);
+}
+
+foreach (var provider in providers)
+{
+    string pk = null;
+    if (provider.Compatible(providerName)) { pk = providerKey; }
+
+    var value = await provider.GetOrNullAsync(feature, pk);
+    if (value != null)
+    {
+        featureNameValueWithGrantedProvider.Value = value;
+        featureNameValueWithGrantedProvider.Provider = new FeatureValueProviderInfo(provider.Name, pk);
+        break;
+    }
+}
+```
+
+`SkipWhile(c => c.Name != providerName)` is how the manager starts the fallback at the requested provider. If you ask for the value at `"T"` (tenant) it considers Tenant → Edition → Configuration → Default; if you ask at `"E"` it considers Edition → Configuration → Default; the read never "moves up the chain" past the provider you targeted.
+
+### Write path
+
+`SetAsync` is where the provider chain becomes more than syntactic sugar. Before storing, it asks the *next* provider for its value: if that fallback already equals the value you tried to set, the write is converted into a clear, so the row never deviates from the inherited value:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Domain/Volo/Abp/FeatureManagement/FeatureManager.cs
+if (providers.Count > 1 && !forceToSet && value != null)
+{
+    await using (await providers[0].HandleContextAsync(providerName, providerKey))
+    {
+        var fallbackValue = await GetOrNullInternalAsync(name, providers[1].Name, null);
+        if (string.Equals(fallbackValue.Value, value, StringComparison.OrdinalIgnoreCase))
+        {
+            //Clear the value if it's same as it's fallback value
+            value = null;
+        }
+    }
+}
+```
+
+That guard means the `AbpFeatureValues` table contains only the values that actually deviate from the chain — keeping the database compact and making "reset to default" a no-op delete.
+
+<Tip>
+`forceToSet: true` lets the `FeatureAppService` bypass this optimisation when a parent feature must be persisted even if its value equals the fallback — for example, when a child feature has already been written and the parent value must be sticky to keep the dependency consistent.
+</Tip>
+
+## FeatureManagementStore — caching + persistence
+
+`FeatureManagementStore` is the bridge between the providers and the `IFeatureValueRepository`. It uses `IDistributedCache<FeatureValueCacheItem>` with `considerUow: true` so that writes inside an open Unit Of Work are not visible to other UoWs until commit:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Domain/Volo/Abp/FeatureManagement/FeatureManagementStore.cs
+[UnitOfWork]
+public virtual async Task SetAsync(string name, string value, string providerName, string providerKey)
+{
+    var featureValue = await FeatureValueRepository.FindAsync(name, providerName, providerKey);
+    if (featureValue == null)
+    {
+        featureValue = new FeatureValue(GuidGenerator.Create(), name, value, providerName, providerKey);
+        await FeatureValueRepository.InsertAsync(featureValue, true);
+    }
+    else
+    {
+        featureValue.Value = value;
+        await FeatureValueRepository.UpdateAsync(featureValue, true);
+    }
+
+    await Cache.SetAsync(CalculateCacheKey(name, providerName, providerKey),
+        new FeatureValueCacheItem(featureValue?.Value), considerUow: true);
+}
+```
+
+`FeatureValueCacheItemInvalidator` (a `ILocalEventHandler<EntityChangedEventData<FeatureValue>>`) removes affected keys when the EF/Mongo layer reports a change, so multi-instance deployments stay consistent without explicit invalidation calls.
+
+## Application service contract
+
+`Volo.Abp.FeatureManagement.Application.Contracts/Volo/Abp/FeatureManagement/IFeatureAppService.cs` is intentionally tiny — three methods that mirror the provider operations:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Application.Contracts/Volo/Abp/FeatureManagement/IFeatureAppService.cs
+public interface IFeatureAppService : IApplicationService
+{
+    Task<GetFeatureListResultDto> GetAsync([NotNull] string providerName, string providerKey);
+    Task UpdateAsync([NotNull] string providerName, string providerKey, UpdateFeaturesDto input);
+    Task DeleteAsync([NotNull] string providerName, string providerKey);
+}
+```
+
+`GetFeatureListResultDto` returns the features grouped by `FeatureGroupDto`. Each `FeatureDto` carries its current value, its `ValueType` (so the UI can render a checkbox vs. a numeric input), its `ParentName` (for nested features) and a `FeatureProviderDto` indicating *which* provider supplied the value. `UpdateFeaturesDto` is simply a list of `(Name, Value)` pairs.
+
+### FeatureAppService implementation
+
+`FeatureAppService` (`Volo.Abp.FeatureManagement.Application/Volo/Abp/FeatureManagement/FeatureAppService.cs`) is `[Authorize]`-only — every method calls `CheckProviderPolicy` to map the `providerName` to a permission via `FeatureManagementOptions.ProviderPolicies`. Reading host-level features needs `FeatureManagementPermissions.ManageHostFeatures`, while tenant features use `AbpTenantManagement.Tenants.ManageFeatures` configured in the module:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Application/Volo/Abp/FeatureManagement/FeatureAppService.cs
+protected virtual async Task CheckProviderPolicy(string providerName, string providerKey)
+{
+    string policyName;
+    if (providerName == TenantFeatureValueProvider.ProviderName &&
+        CurrentTenant.Id == null && providerKey == null)
+    {
+        policyName = FeatureManagementPermissions.ManageHostFeatures;
+    }
+    else
+    {
+        policyName = Options.ProviderPolicies.GetOrDefault(providerName);
+        if (policyName.IsNullOrEmpty())
+        {
+            throw new AbpException($"No policy defined to get/set permissions for the provider '{providerName}'. " +
+                                   $"Use {nameof(FeatureManagementOptions)} to map the policy.");
+        }
+    }
+
+    await AuthorizationService.CheckAsync(policyName);
+}
+```
+
+The `GetAsync` method walks every `FeatureGroupDefinition` returned by `IFeatureDefinitionManager` and, for each feature, calls `FeatureManager.GetOrNullWithProviderAsync` so the UI sees the resolved value *and* the provider that supplied it. There is a host-only filter that hides features marked `IsAvailableToHost = false` from a host administrator viewing the tenant provider with no `providerKey`:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Application/Volo/Abp/FeatureManagement/FeatureAppService.cs
+if (providerName == TenantFeatureValueProvider.ProviderName &&
+    CurrentTenant.Id == null && providerKey == null &&
+    !featureDefinition.IsAvailableToHost)
+{
+    continue;
+}
+
+var feature = await FeatureManager.GetOrNullWithProviderAsync(featureDefinition.Name, providerName, providerKey);
+groupDto.Features.Add(CreateFeatureDto(feature, featureDefinition));
+```
+
+`UpdateAsync` is where the parent/child semantics live. It walks each feature in the input, looks up its `featureDefinition.Children` and writes them *first*. If any child ends up explicitly stored at the current provider, the parent is then written with `forceToSet: true`:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Application/Volo/Abp/FeatureManagement/FeatureAppService.cs
+foreach (var feature in features)
+{
+    var forceToSet = false;
+    foreach (var childFeature in feature.Value)
+    {
+        await FeatureManager.SetAsync(childFeature.Name, childFeature.Value, providerName, providerKey);
+        var value = await FeatureManager.GetOrNullWithProviderAsync(childFeature.Name, providerName, providerKey);
+        if (value.Provider.Name == providerName && value.Provider.Key == providerKey)
+        {
+            forceToSet = true;
+        }
+    }
+
+    await FeatureManager.SetAsync(feature.Key.Name, feature.Key.Value, providerName, providerKey, forceToSet: forceToSet);
+}
+```
+
+### HTTP endpoints
+
+`FeaturesController` (`Volo.Abp.FeatureManagement.HttpApi/Volo/Abp/FeatureManagement/FeaturesController.cs`) is a thin pass-through — it inherits `IFeatureAppService` so the contract and the controller stay in lock-step, and the `[Route("api/feature-management/features")]` attribute fixes the URL contract used by the dynamic C# proxies in `*.HttpApi.Client`:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.HttpApi/Volo/Abp/FeatureManagement/FeaturesController.cs
+[RemoteService(Name = FeatureManagementRemoteServiceConsts.RemoteServiceName)]
+[Area(FeatureManagementRemoteServiceConsts.ModuleName)]
+[Route("api/feature-management/features")]
+public class FeaturesController : AbpControllerBase, IFeatureAppService
+{
+    [HttpGet]
+    public virtual Task<GetFeatureListResultDto> GetAsync(string providerName, string providerKey)
+        => FeatureAppService.GetAsync(providerName, providerKey);
+
+    [HttpPut]
+    public virtual Task UpdateAsync(string providerName, string providerKey, UpdateFeaturesDto input)
+        => FeatureAppService.UpdateAsync(providerName, providerKey, input);
+
+    [HttpDelete]
+    public virtual Task DeleteAsync(string providerName, string providerKey)
+        => FeatureAppService.DeleteAsync(providerName, providerKey);
+}
+```
+
+| Verb | Route | App service method |
+| --- | --- | --- |
+| `GET` | `api/feature-management/features?providerName=&providerKey=` | `GetAsync` |
+| `PUT` | `api/feature-management/features?providerName=&providerKey=` | `UpdateAsync` |
+| `DELETE` | `api/feature-management/features?providerName=&providerKey=` | `DeleteAsync` |
+
+## Entity Framework Core persistence
+
+`Volo.Abp.FeatureManagement.EntityFrameworkCore/Volo/Abp/FeatureManagement/EntityFrameworkCore/FeatureManagementDbContextModelCreatingExtensions.cs` is where the three tables (`AbpFeatureValues`, `AbpFeatureGroups`, `AbpFeatures`) are configured. The `FeatureValue` mapping pins down lengths from `FeatureValueConsts` and enforces the unique triple index:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.EntityFrameworkCore/Volo/Abp/FeatureManagement/EntityFrameworkCore/FeatureManagementDbContextModelCreatingExtensions.cs
+builder.Entity<FeatureValue>(b =>
+{
+    b.ToTable(AbpFeatureManagementDbProperties.DbTablePrefix + "FeatureValues",
+        AbpFeatureManagementDbProperties.DbSchema);
+
+    b.ConfigureByConvention();
+
+    b.Property(x => x.Name).HasMaxLength(FeatureValueConsts.MaxNameLength).IsRequired();
+    b.Property(x => x.Value).HasMaxLength(FeatureValueConsts.MaxValueLength).IsRequired();
+    b.Property(x => x.ProviderName).HasMaxLength(FeatureValueConsts.MaxProviderNameLength);
+    b.Property(x => x.ProviderKey).HasMaxLength(FeatureValueConsts.MaxProviderKeyLength);
+
+    b.HasIndex(x => new { x.Name, x.ProviderName, x.ProviderKey }).IsUnique();
+
+    b.ApplyObjectExtensionMappings();
+});
+```
+
+The `IsTenantOnlyDatabase()` guard at the top of the extension method is the same one used by [Permission Management](/modules/permission-management) — when the host has split its model so that tenant DBs hold only tenant-specific entities, these tables are skipped because they are global. The repository `EfCoreFeatureValueRepository` then implements `IFeatureValueRepository` with three lookups: a single-result `FindAsync(name, providerName, providerKey)`, a list-by-triple `FindAllAsync`, and a bulk `DeleteAsync(providerName, providerKey)` used to clear all values for a tenant in a single SQL command:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.EntityFrameworkCore/Volo/Abp/FeatureManagement/EntityFrameworkCore/EfCoreFeatureValueRepository.cs
+public virtual async Task<FeatureValue> FindAsync(string name, string providerName, string providerKey, ...)
+{
+    return await (await GetDbSetAsync())
+        .OrderBy(x => x.Id)
+        .FirstOrDefaultAsync(s => s.Name == name &&
+                                  s.ProviderName == providerName &&
+                                  s.ProviderKey == providerKey, ...);
+}
+
+public virtual async Task DeleteAsync(string providerName, string providerKey, ...)
+{
+    await DeleteAsync(s => s.ProviderName == providerName && s.ProviderKey == providerKey, ...);
+}
+```
+
+The DbContext type `FeatureManagementDbContext` is intentionally constrained by the `IFeatureManagementDbContext` interface so a host can compose feature management with its own context in a single connection — see [Entity Framework Core](/data/entity-framework-core) for the `IDbContextProvider<T>` plumbing.
+
+## MongoDB persistence
+
+The MongoDB layer mirrors EF: `FeatureManagementMongoDbContext`, `MongoFeatureValueRepository` and the extension method `ConfigureFeatureManagement` set up three collections named `AbpFeatureValues`, `AbpFeatureGroups`, `AbpFeatures`. See [MongoDB Integration](/data/mongodb-integration) for the registration patterns and the way `IMongoDbContextProvider<T>` resolves a context.
+
+## Module dependencies and initialization
+
+`AbpFeatureManagementDomainModule.OnApplicationInitializationAsync` runs the `FeatureDynamicInitializer` once the host has booted. The initializer reads every static feature definition through `IFeatureDefinitionProvider`, serializes them and upserts the `FeatureDefinitionRecord` rows. The cancellation token is held on the module so a shutdown aborts a half-run initialization cleanly:
+
+```csharp
+// modules/feature-management/src/Volo.Abp.FeatureManagement.Domain/Volo/Abp/FeatureManagement/AbpFeatureManagementDomainModule.cs
+public override async Task OnApplicationInitializationAsync(ApplicationInitializationContext context)
+{
+    var rootServiceProvider = context.ServiceProvider.GetRequiredService<IRootServiceProvider>();
+    var initializer = rootServiceProvider.GetRequiredService<FeatureDynamicInitializer>();
+    await initializer.InitializeAsync(true, _cancellationTokenSource.Token);
+}
+
+public override Task OnApplicationShutdownAsync(ApplicationShutdownContext context)
+{
+    _cancellationTokenSource.Cancel();
+    return Task.CompletedTask;
+}
+```
+
+The `IsDataMigrationEnvironment()` short-circuit at the bottom of `ConfigureServices` disables the dynamic store during the `*.DbMigrator` host so migrations never accidentally seed feature data into a target database before the schema has been created.
+
+## How it fits together
+
+<CardGroup cols={2}>
+  <Card title="Runtime feature checks" href="/security/features-and-feature-management">
+    The `Volo.Abp.Features` package decides whether code is allowed to run — it queries `IFeatureValueProvider` implementations that this module's `IFeatureManagementProvider` chain ultimately backs.
+  </Card>
+  <Card title="Tenant Management" href="/modules/tenant-management">
+    `Tenant.EditionId` is what `EditionFeatureManagementProvider` uses to map a tenant to an edition's feature values.
+  </Card>
+  <Card title="Permission Management" href="/modules/permission-management">
+    `FeatureManagementPermissions.ManageHostFeatures` and `AbpTenantManagement.Tenants.ManageFeatures` are persisted by the permission management module.
+  </Card>
+  <Card title="EF Core integration" href="/data/entity-framework-core">
+    `FeatureManagementDbContext` is composed into the host context like the other module DbContexts.
+  </Card>
+</CardGroup>
+
+<Warning>
+The module always registers the four built-in providers. If your host needs a different order, replace the `FeatureManagementOptions.Providers` list during `PreConfigureServices` *before* `AbpFeatureManagementDomainModule.ConfigureServices` runs — modifying after the fact has no effect because `FeatureManager` captures the list in a `Lazy<>` and resolves the services on first use.
+</Warning>
+
+## Summary
+
+The Feature Management module is a textbook example of the ABP layered DDD packaging: a single `FeatureValue` aggregate root, four provider implementations chained by `FeatureManager`, an `IFeatureAppService` exposed through a `FeaturesController` route at `api/feature-management/features`, and parallel EF / Mongo persistence. The clear separation between the *static feature runtime* in `Volo.Abp.Features` and the *administrative store* in `Volo.Abp.FeatureManagement` is what allows ABP to support multi-tenant SaaS pricing tiers without leaking persistence concerns into the feature-checking code paths.

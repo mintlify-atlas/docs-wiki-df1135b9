@@ -1,0 +1,274 @@
+---
+title: "Virtual file system: embedded resources made shippable"
+sidebarTitle: "Virtual File System"
+description: "Serve embedded resources, physical files and dynamic content as a single IFileProvider with ABP's VirtualFileProvider and AbpVirtualFileSystemOptions."
+---
+
+ABP Framework lets a module ship Razor views, JavaScript bundles, localization JSON, email templates and seed data **inside its assembly** while still letting the host application override individual files on disk. This page documents the `IVirtualFileProvider` abstraction, the `VirtualFileSetList` configuration model, how `AbpEmbeddedFileProvider` parses manifest resources, and the embedded/physical/dynamic layering that `VirtualFileProvider` composes.
+
+## The contract
+
+`framework/src/Volo.Abp.VirtualFileSystem/Volo/Abp/VirtualFileSystem/IVirtualFileProvider.cs` is just a typed alias for `Microsoft.Extensions.FileProviders.IFileProvider`:
+
+```csharp IVirtualFileProvider.cs
+public interface IVirtualFileProvider : IFileProvider
+{
+}
+```
+
+That alias is what consumers inject. The reason it exists is so ABP can register a single, composite file provider for module content without colliding with ASP.NET Core's own `IFileProvider` registration for static files.
+
+## VirtualFileProvider — composition layer
+
+The default `VirtualFileProvider` (`VirtualFileProvider.cs`) is a singleton that composes three layers in priority order:
+
+```csharp VirtualFileProvider.cs
+public VirtualFileProvider(
+    IOptions<AbpVirtualFileSystemOptions> options,
+    IDynamicFileProvider dynamicFileProvider)
+{
+    _options = options.Value;
+    _hybridFileProvider = CreateHybridProvider(dynamicFileProvider);
+}
+
+protected virtual IFileProvider CreateHybridProvider(IDynamicFileProvider dynamicFileProvider)
+{
+    var fileProviders = new List<IFileProvider>();
+    fileProviders.Add(dynamicFileProvider);
+    foreach (var fileSet in _options.FileSets.AsEnumerable().Reverse())
+    {
+        fileProviders.Add(fileSet.FileProvider);
+    }
+    return new CompositeFileProvider(fileProviders);
+}
+```
+
+The order matters:
+
+1. **Dynamic provider first** — `IDynamicFileProvider` lets modules push files at runtime (used by the Bundling system and bundles compiled on first request).
+2. **Registered file sets in reverse** — modules added later win over modules added earlier, which is what makes "the host overrides the module" work.
+
+`GetFileInfo`, `GetDirectoryContents` and `Watch` simply delegate to the composite.
+
+## AbpVirtualFileSystemOptions and VirtualFileSetList
+
+`AbpVirtualFileSystemOptions.FileSets` is a `VirtualFileSetList` (a `List<VirtualFileSetInfo>`) that you populate from module `ConfigureServices`:
+
+```csharp AbpVirtualFileSystemOptions.cs
+public class AbpVirtualFileSystemOptions
+{
+    public VirtualFileSetList FileSets { get; }
+}
+```
+
+A `VirtualFileSetInfo` wraps an `IFileProvider` and exposes its origin:
+
+```csharp VirtualFileSetInfo.cs
+public class VirtualFileSetInfo
+{
+    public IFileProvider FileProvider { get; }
+}
+```
+
+The two built-in subclasses are `EmbeddedVirtualFileSetInfo` and `PhysicalVirtualFileSetInfo` — both keep enough provenance (assembly, base folder, root path) for tooling to inspect the layered system.
+
+## Registering files
+
+`VirtualFileSetListExtensions` (in `VirtualFileSetListExtensions.cs`) is the API your `ConfigureServices` calls:
+
+```csharp VirtualFileSetListExtensions.cs (excerpt)
+public static void AddEmbedded<T>(
+    [NotNull] this VirtualFileSetList list,
+    string? baseNamespace = null,
+    string? baseFolder = null)
+{
+    var assembly = typeof(T).Assembly;
+    var fileProvider = CreateFileProvider(assembly, baseNamespace, baseFolder);
+    list.Add(new EmbeddedVirtualFileSetInfo(fileProvider, assembly, baseFolder));
+}
+
+public static void AddPhysical(
+    [NotNull] this VirtualFileSetList list,
+    [NotNull] string root,
+    ExclusionFilters exclusionFilters = ExclusionFilters.Sensitive)
+{
+    var fileProvider = new PhysicalFileProvider(root, exclusionFilters);
+    list.Add(new PhysicalVirtualFileSetInfo(fileProvider, root));
+}
+```
+
+Typical module wiring:
+
+```csharp
+public override void ConfigureServices(ServiceConfigurationContext context)
+{
+    Configure<AbpVirtualFileSystemOptions>(o =>
+    {
+        o.FileSets.AddEmbedded<MyAppModule>();
+    });
+}
+```
+
+The marker type `MyAppModule` just provides the assembly — its namespace is used as the default base namespace for the embedded resources.
+
+## Manifest vs reflection-based embedded provider
+
+`CreateFileProvider` decides between two strategies based on whether the assembly contains the `Microsoft.Extensions.FileProviders.Embedded.Manifest.xml` resource:
+
+```csharp
+var info = assembly.GetManifestResourceInfo("Microsoft.Extensions.FileProviders.Embedded.Manifest.xml");
+
+if (info == null)
+{
+    return new AbpEmbeddedFileProvider(assembly, baseNamespace);
+}
+
+if (baseFolder == null)
+{
+    return new ManifestEmbeddedFileProvider(assembly);
+}
+
+return new ManifestEmbeddedFileProvider(assembly, baseFolder);
+```
+
+| Provider | When chosen | How it works |
+| --- | --- | --- |
+| `AbpEmbeddedFileProvider` | No manifest in the assembly | Walks `Assembly.GetManifestResourceNames()` and converts dotted resource names back into path-style entries. |
+| `ManifestEmbeddedFileProvider` | Manifest XML present (when you add `<GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>` to the csproj) | Reads the manifest XML for an O(1) lookup. |
+
+### AbpEmbeddedFileProvider name conversion
+
+The ABP provider stores entries in a `Dictionary<string, IFileInfo>` (it derives from `DictionaryBasedFileProvider`) and converts resource names back into virtual paths in `ConvertToRelativePath`:
+
+```csharp AbpEmbeddedFileProvider.cs (excerpt)
+private string ConvertToRelativePath(string resourceName)
+{
+    if (!BaseNamespace.IsNullOrEmpty())
+        resourceName = resourceName.Substring(BaseNamespace!.Length + 1);
+
+    var pathParts = resourceName.Split('.');
+    if (pathParts.Length <= 2) return resourceName;
+
+    var folder = pathParts.Take(pathParts.Length - 2).JoinAsString("/");
+    var fileName = pathParts[pathParts.Length - 2] + "." + pathParts[pathParts.Length - 1];
+
+    return folder + "/" + fileName;
+}
+```
+
+So an embedded resource `MyApp.Templates.WelcomeEmail.cshtml` becomes the virtual path `/Templates/WelcomeEmail.cshtml`. Directories are reconstructed recursively via `AddDirectoriesRecursively` so `GetDirectoryContents("/Templates")` returns the file.
+
+## Replacing embedded files with physical ones
+
+During development you want to edit `.cshtml` files without restarting the host. `ReplaceEmbeddedByPhysical<T>` swaps the assembly's embedded set for a physical folder so changes hit immediately:
+
+```csharp VirtualFileSetListExtensions.cs (excerpt)
+public static void ReplaceEmbeddedByPhysical<T>(
+    [NotNull] this VirtualFileSetList fileSets,
+    [NotNull] string physicalPath)
+{
+    var assembly = typeof(T).Assembly;
+    for (var i = 0; i < fileSets.Count; i++)
+    {
+        if (fileSets[i] is EmbeddedVirtualFileSetInfo embedded
+            && embedded.Assembly == assembly)
+        {
+            var thisPath = physicalPath;
+            if (!embedded.BaseFolder.IsNullOrEmpty())
+                thisPath = Path.Combine(thisPath, embedded.BaseFolder!);
+            fileSets[i] = new PhysicalVirtualFileSetInfo(
+                new PhysicalFileProvider(thisPath), thisPath);
+        }
+    }
+}
+```
+
+A typical dev-only wiring:
+
+```csharp
+if (hostingEnvironment.IsDevelopment())
+{
+    Configure<AbpVirtualFileSystemOptions>(o =>
+    {
+        o.FileSets.ReplaceEmbeddedByPhysical<MyAppModule>(
+            Path.Combine(hostingEnvironment.ContentRootPath, "..", "MyApp.Domain"));
+    });
+}
+```
+
+The `ContentRootPath` walk-up lets the running host project pull files from a sibling project's source tree.
+
+## Dynamic files
+
+`IDynamicFileProvider` (and its default `DynamicFileProvider`) is the slot for files produced at runtime — bundled CSS/JS in `Volo.Abp.AspNetCore.Mvc.UI.Bundling`, generated proxy clients, or any module that needs to publish content without an assembly rebuild. Because it sits **first** in the composite, dynamic files take precedence over everything else; the bundling module flushes dynamic entries when configuration changes.
+
+## DictionaryBasedFileProvider and IDirectoryContents
+
+`DictionaryBasedFileProvider` (the base for `AbpEmbeddedFileProvider`) implements `GetDirectoryContents` by walking the dictionary keys and returning only direct children — folder semantics on top of a flat dictionary:
+
+```csharp DictionaryBasedFileProvider.cs (excerpt)
+public virtual IDirectoryContents GetDirectoryContents(string subpath)
+{
+    var directory = GetFileInfo(subpath);
+    if (!directory.IsDirectory) return NotFoundDirectoryContents.Singleton;
+
+    var fileList = new List<IFileInfo>();
+    var directoryPath = subpath.EnsureEndsWith('/');
+    foreach (var fileInfo in Files.Values)
+    {
+        var fullPath = fileInfo.GetVirtualOrPhysicalPathOrNull();
+        if (fullPath == null || !fullPath.StartsWith(directoryPath)) continue;
+        var relativePath = fullPath.Substring(directoryPath.Length);
+        if (relativePath.Contains("/")) continue;
+        fileList.Add(fileInfo);
+    }
+    return new EnumerableDirectoryContents(fileList);
+}
+```
+
+The check `!relativePath.Contains("/")` is what restricts the result to immediate children.
+
+## Layered lookup
+
+```mermaid
+flowchart TD
+    Caller[Caller] --> VFP[IVirtualFileProvider<br/>CompositeFileProvider]
+    VFP --> D[IDynamicFileProvider<br/>(runtime-generated bundles)]
+    VFP --> M3[Host module FileSets<br/>(added last → highest priority)]
+    VFP --> M2[Feature module FileSets]
+    VFP --> M1[Base framework FileSets]
+    M1 --> Emb1[AbpEmbeddedFileProvider]
+    M2 --> Emb2[ManifestEmbeddedFileProvider]
+    M3 --> Phys[PhysicalFileProvider]
+```
+
+Because the composite stops on the first hit, the host's `ReplaceEmbeddedByPhysical<T>` is enough to override any module file by path — no namespaced files-system tricks required.
+
+## Common consumers inside ABP
+
+| Module | Files it ships through VFS |
+| --- | --- |
+| `Volo.Abp.Localization` | JSON localization resources read by `AbpLocalizationOptions.Resources.AddVirtualJson(...)`. |
+| `Volo.Abp.TextTemplating.Razor` / `.Scriban` | `.cshtml` / `.sbn` template bodies. See [/infrastructure/text-templating](/infrastructure/text-templating). |
+| `Volo.Abp.AspNetCore.Mvc.UI.*` | Razor views, partials, taghelpers, JS, CSS. |
+| `Volo.Abp.Settings.Definitions` (via JSON) | Static definition files (when used). |
+
+## Diagnostic walk
+
+Every `IVirtualFileProvider` lookup is just `IFileProvider.GetFileInfo(subpath)`. Two helpers in the `Embedded`/`Physical` namespaces add provenance — `GetVirtualOrPhysicalPathOrNull` returns the path the file thinks it has — handy when you want to log where a file actually came from at runtime.
+
+```csharp
+var fileInfo = _virtualFileProvider.GetFileInfo("/Templates/WelcomeEmail/en.cshtml");
+if (!fileInfo.Exists)
+    throw new AbpException("Template missing");
+
+using var stream = fileInfo.CreateReadStream();
+```
+
+## See also
+
+- [/infrastructure/overview](/infrastructure/overview)
+- [/infrastructure/text-templating](/infrastructure/text-templating) — the largest consumer of VFS.
+- [/core/modularity-and-modules](/core/modularity-and-modules) — module load order determines file-set precedence.
+- [/security/localization](/security/localization) — localization JSON loaded from virtual files.
+- [/infrastructure/blob-storing](/infrastructure/blob-storing) — different abstraction for tenant content; VFS is for shipped/static content.

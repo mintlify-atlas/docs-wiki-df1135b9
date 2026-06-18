@@ -1,0 +1,431 @@
+---
+title: "Audit Logging Module — AuditLog Aggregate & Store"
+sidebarTitle: "Audit Logging"
+description: "Volo.Abp.AuditLogging persists AuditLog with child AuditLogAction, EntityChange and EntityPropertyChange aggregates and implements IAuditingStore."
+---
+
+The Audit Logging module under `modules/audit-logging/src/` is ABP Framework's persistent implementation of the `IAuditingStore` contract declared by `Volo.Abp.Auditing`. The runtime audit interceptors in [Auditing](/infrastructure/auditing) capture every interesting fact about a request — caller, duration, IP, exceptions, entity changes — and forward them to whatever store is registered. This module is the canonical store: it converts the `AuditLogInfo` capture object into an `AuditLog` aggregate root and writes it through EF Core or MongoDB.
+
+This page walks through the four entities involved (`AuditLog` aggregate with three child entities `AuditLogAction`, `EntityChange`, `EntityPropertyChange`), the `AuditLogInfoToAuditLogConverter` that bridges the framework's DTOs to the aggregate, the `AuditingStore` implementation that owns its own unit-of-work, and the EF Core / MongoDB persistence projects under `Volo.Abp.AuditLogging.EntityFrameworkCore` and `Volo.Abp.AuditLogging.MongoDB`.
+
+## Project layout
+
+The module is unusually small — there is no application service or HTTP API, because reading audit logs is typically handled by host-specific admin tooling (the commercial ABP modules ship an admin UI; the open-source module just persists). The five projects are:
+
+```
+modules/audit-logging/src/
+├── Volo.Abp.AuditLogging.Domain.Shared/      Consts, enums, AbpAuditLoggingDbProperties
+├── Volo.Abp.AuditLogging.Domain/             Aggregates, AuditingStore, AuditLogInfoToAuditLogConverter
+├── Volo.Abp.AuditLogging.EntityFrameworkCore/ AbpAuditLoggingDbContext + EF repository
+├── Volo.Abp.AuditLogging.MongoDB/             AuditLoggingMongoDbContext + Mongo repository
+└── Volo.Abp.AuditLogging.Installer/           NuGet meta-package
+```
+
+The asymmetry vs. [Identity](/modules/identity) or [Tenant Management](/modules/tenant-management) is by design — audit data is normally written by the framework and consumed read-only, so the module owns no `*.HttpApi` or `*.Web` projects.
+
+## Module dependencies
+
+`AbpAuditLoggingDomainModule` depends on `AbpAuditingModule` — the runtime that produces `AuditLogInfo`. That dependency is what allows DI to discover `AuditingStore` and replace the default no-op `IAuditingStore`:
+
+```csharp
+// modules/audit-logging/src/Volo.Abp.AuditLogging.Domain/Volo/Abp/AuditLogging/AbpAuditLoggingDomainModule.cs
+[DependsOn(typeof(AbpAuditingModule))]
+[DependsOn(typeof(AbpDddDomainModule))]
+[DependsOn(typeof(AbpAuditLoggingDomainSharedModule))]
+[DependsOn(typeof(AbpExceptionHandlingModule))]
+[DependsOn(typeof(AbpJsonModule))]
+public class AbpAuditLoggingDomainModule : AbpModule
+{
+    public override void PostConfigureServices(ServiceConfigurationContext context)
+    {
+        OneTimeRunner.Run(() =>
+        {
+            ModuleExtensionConfigurationHelper.ApplyEntityConfigurationToEntity(
+                AuditLoggingModuleExtensionConsts.ModuleName,
+                AuditLoggingModuleExtensionConsts.EntityNames.AuditLog,
+                typeof(AuditLog));
+            // ... AuditLogAction, EntityChange
+        });
+    }
+}
+```
+
+The `PostConfigureServices` block wires up object extensions so a host can declare `ObjectExtensionManager.Instance.AddOrUpdateProperty<AuditLog, string>("MyExtraColumn")` and have it flow through the `ExtraProperties` dictionary into a real database column. This is the same mechanism described in the framework's object-extension docs.
+
+## The AuditLog aggregate root
+
+`Volo.Abp.AuditLogging.Domain/Volo/Abp/AuditLogging/AuditLog.cs` is a large but flat aggregate. It implements `IMultiTenant` so `[TenantId]` data filters work, and is annotated `[DisableAuditing]` so writing the audit log itself does not generate another audit log entry (which would loop forever):
+
+```csharp
+// modules/audit-logging/src/Volo.Abp.AuditLogging.Domain/Volo/Abp/AuditLogging/AuditLog.cs
+[DisableAuditing]
+public class AuditLog : AggregateRoot<Guid>, IMultiTenant
+{
+    public virtual string ApplicationName { get; set; }
+    public virtual Guid? UserId { get; protected set; }
+    public virtual string UserName { get; protected set; }
+    public virtual Guid? TenantId { get; protected set; }
+    public virtual string TenantName { get; protected set; }
+
+    public virtual Guid? ImpersonatorUserId { get; protected set; }
+    public virtual string ImpersonatorUserName { get; protected set; }
+    public virtual Guid? ImpersonatorTenantId { get; protected set; }
+    public virtual string ImpersonatorTenantName { get; protected set; }
+
+    public virtual DateTime ExecutionTime { get; protected set; }
+    public virtual int ExecutionDuration { get; protected set; }
+
+    public virtual string ClientIpAddress { get; protected set; }
+    public virtual string ClientName { get; protected set; }
+    public virtual string ClientId { get; set; }
+    public virtual string CorrelationId { get; set; }
+    public virtual string BrowserInfo { get; protected set; }
+    public virtual string HttpMethod { get; protected set; }
+    public virtual string Url { get; protected set; }
+    public virtual string Exceptions { get; protected set; }
+    public virtual string Comments { get; protected set; }
+    public virtual int? HttpStatusCode { get; set; }
+
+    public virtual ICollection<EntityChange> EntityChanges { get; protected set; }
+    public virtual ICollection<AuditLogAction> Actions { get; protected set; }
+}
+```
+
+Why so many columns? The `AuditLog` row needs to be self-contained even when the related user / tenant records are deleted later — so names are denormalised alongside ids. The `Impersonator*` set covers cross-tenant impersonation (the [Identity](/modules/identity) module's `IdentityUserDelegation` flow).
+
+The constructor truncates every string at the limits declared by `AuditLogConsts`, so an oversized URL or 100 KB of comments cannot overflow a column:
+
+```csharp
+// modules/audit-logging/src/Volo.Abp.AuditLogging.Domain/Volo/Abp/AuditLogging/AuditLog.cs
+ApplicationName = applicationName.Truncate(AuditLogConsts.MaxApplicationNameLength);
+TenantName = tenantName.Truncate(AuditLogConsts.MaxTenantNameLength);
+UserName = userName.Truncate(AuditLogConsts.MaxUserNameLength);
+ClientIpAddress = clientIpAddress.Truncate(AuditLogConsts.MaxClientIpAddressLength);
+ClientName = clientName.Truncate(AuditLogConsts.MaxClientNameLength);
+ClientId = clientId.Truncate(AuditLogConsts.MaxClientIdLength);
+CorrelationId = correlationId.Truncate(AuditLogConsts.MaxCorrelationIdLength);
+BrowserInfo = browserInfo.Truncate(AuditLogConsts.MaxBrowserInfoLength);
+HttpMethod = httpMethod.Truncate(AuditLogConsts.MaxHttpMethodLength);
+Url = url.Truncate(AuditLogConsts.MaxUrlLength);
+Comments = comments.Truncate(AuditLogConsts.MaxCommentsLength);
+```
+
+<Note>
+`AuditLog` extends `AggregateRoot<Guid>` not `FullAuditedAggregateRoot<Guid>` — the row is itself an audit record, so it makes no sense to audit its `CreationTime` and `CreatorId` separately. `ExecutionTime` plays the role of "created at".
+</Note>
+
+## Child entity — AuditLogAction
+
+Every server method captured by the auditing infrastructure becomes one `AuditLogAction` row attached to the `AuditLog`. The action records *which service / method* ran and how long it took:
+
+```csharp
+// modules/audit-logging/src/Volo.Abp.AuditLogging.Domain/Volo/Abp/AuditLogging/AuditLogAction.cs
+[DisableAuditing]
+public class AuditLogAction : Entity<Guid>, IMultiTenant, IHasExtraProperties
+{
+    public virtual Guid? TenantId { get; protected set; }
+    public virtual Guid AuditLogId { get; protected set; }
+    public virtual string ServiceName { get; protected set; }
+    public virtual string MethodName { get; protected set; }
+    public virtual string Parameters { get; protected set; }
+    public virtual DateTime ExecutionTime { get; protected set; }
+    public virtual int ExecutionDuration { get; protected set; }
+    public virtual ExtraPropertyDictionary ExtraProperties { get; protected set; }
+
+    public AuditLogAction(Guid id, Guid auditLogId, AuditLogActionInfo actionInfo, Guid? tenantId = null)
+    {
+        Id = id;
+        TenantId = tenantId;
+        AuditLogId = auditLogId;
+        ExecutionTime = actionInfo.ExecutionTime;
+        ExecutionDuration = actionInfo.ExecutionDuration;
+        ExtraProperties = new ExtraPropertyDictionary(actionInfo.ExtraProperties);
+        ServiceName = actionInfo.ServiceName.TruncateFromBeginning(AuditLogActionConsts.MaxServiceNameLength);
+        MethodName = actionInfo.MethodName.TruncateFromBeginning(AuditLogActionConsts.MaxMethodNameLength);
+        Parameters = actionInfo.Parameters.Length > AuditLogActionConsts.MaxParametersLength ? "" : actionInfo.Parameters;
+    }
+}
+```
+
+`ServiceName` and `MethodName` are truncated *from the beginning* — i.e. the *end* of the fully-qualified name is kept. This matters because the suffix (`UpdateAsync`, `LoginAsync`, …) carries more diagnostic value than the namespace prefix. `Parameters` is the serialized JSON of the method arguments; when oversized it is dropped to empty rather than silently truncated (so it never produces invalid JSON).
+
+## Child entity — EntityChange and EntityPropertyChange
+
+When the host opts into entity-level auditing (`AbpAuditingOptions.EntityHistorySelectors`), every entity write produces an `EntityChange` row with one `EntityPropertyChange` row per modified property:
+
+```csharp
+// modules/audit-logging/src/Volo.Abp.AuditLogging.Domain/Volo/Abp/AuditLogging/EntityChange.cs
+[DisableAuditing]
+public class EntityChange : Entity<Guid>, IMultiTenant, IHasExtraProperties
+{
+    public virtual Guid AuditLogId { get; protected set; }
+    public virtual Guid? TenantId { get; protected set; }
+    public virtual DateTime ChangeTime { get; protected set; }
+    public virtual EntityChangeType ChangeType { get; protected set; }
+    public virtual Guid? EntityTenantId { get; protected set; }
+    public virtual string EntityId { get; protected set; }
+    public virtual string EntityTypeFullName { get; protected set; }
+    public virtual ICollection<EntityPropertyChange> PropertyChanges { get; protected set; }
+    public virtual ExtraPropertyDictionary ExtraProperties { get; protected set; }
+}
+```
+
+The constructor cascades child creation: every `EntityPropertyChangeInfo` becomes an `EntityPropertyChange` with the same `tenantId` and a fresh `IGuidGenerator`-generated id:
+
+```csharp
+// modules/audit-logging/src/Volo.Abp.AuditLogging.Domain/Volo/Abp/AuditLogging/EntityChange.cs
+PropertyChanges = entityChangeInfo
+                      .PropertyChanges?
+                      .Select(p => new EntityPropertyChange(guidGenerator, Id, p, tenantId))
+                      .ToList()
+                  ?? new List<EntityPropertyChange>();
+```
+
+`EntityPropertyChange` is a flat row recording `PropertyName`, `PropertyTypeFullName`, `OriginalValue` and `NewValue`:
+
+```csharp
+// modules/audit-logging/src/Volo.Abp.AuditLogging.Domain/Volo/Abp/AuditLogging/EntityPropertyChange.cs
+[DisableAuditing]
+public class EntityPropertyChange : Entity<Guid>, IMultiTenant
+{
+    public virtual Guid? TenantId { get; protected set; }
+    public virtual Guid EntityChangeId { get; protected set; }
+    public virtual string NewValue { get; protected set; }
+    public virtual string OriginalValue { get; protected set; }
+    public virtual string PropertyName { get; protected set; }
+    public virtual string PropertyTypeFullName { get; protected set; }
+}
+```
+
+`EntityTenantId` on `EntityChange` is distinct from the parent's `TenantId` because a host-side admin may modify a tenant-scoped entity — the action lives in the host audit context but the entity belongs to a tenant.
+
+## AuditLogInfoToAuditLogConverter — the bridge
+
+The `Volo.Abp.Auditing` runtime captures everything into an `AuditLogInfo` POCO. `AuditLogInfoToAuditLogConverter` is what turns it into an `AuditLog` aggregate. It does three things at once: assigns a fresh `Guid` for the audit log id, runs the entity-type renamer, and serializes any captured `Exception` objects through `IExceptionToErrorInfoConverter`:
+
+```csharp
+// modules/audit-logging/src/Volo.Abp.AuditLogging.Domain/Volo/Abp/AuditLogging/AuditLogInfoToAuditLogConverter.cs
+public virtual Task<AuditLog> ConvertAsync(AuditLogInfo auditLogInfo)
+{
+    var auditLogId = GuidGenerator.Create();
+
+    foreach (var entityChange in auditLogInfo.EntityChanges ?? Enumerable.Empty<EntityChangeInfo>())
+    {
+        entityChange.EntityTypeFullName = AuditLogEntityTypeFullNameConverter.Convert(entityChange.EntityTypeFullName);
+        foreach (var propertyChange in entityChange.PropertyChanges ?? Enumerable.Empty<EntityPropertyChangeInfo>())
+        {
+            propertyChange.PropertyTypeFullName = AuditLogEntityTypeFullNameConverter.Convert(propertyChange.PropertyTypeFullName);
+        }
+    }
+
+    var entityChanges = auditLogInfo
+        .EntityChanges?
+        .Select(entityChangeInfo => new EntityChange(GuidGenerator, auditLogId, entityChangeInfo, tenantId: auditLogInfo.TenantId))
+        .ToList()
+        ?? new List<EntityChange>();
+
+    var actions = auditLogInfo
+        .Actions?
+        .Select(auditLogActionInfo => new AuditLogAction(GuidGenerator.Create(), auditLogId, auditLogActionInfo, tenantId: auditLogInfo.TenantId))
+        .ToList()
+        ?? new List<AuditLogAction>();
+```
+
+The exception-to-string step honours the host's `AbpExceptionHandlingOptions` settings — so a production deployment that hides stack traces from clients also hides them from the audit log table:
+
+```csharp
+// modules/audit-logging/src/Volo.Abp.AuditLogging.Domain/Volo/Abp/AuditLogging/AuditLogInfoToAuditLogConverter.cs
+var remoteServiceErrorInfos = auditLogInfo.Exceptions?
+    .Select(exception => ExceptionToErrorInfoConverter.Convert(exception, options =>
+    {
+        options.SendExceptionsDetailsToClients = ExceptionHandlingOptions.SendExceptionsDetailsToClients;
+        options.SendStackTraceToClients = ExceptionHandlingOptions.SendStackTraceToClients;
+        options.SendExceptionDataToClientTypes = ExceptionHandlingOptions.SendExceptionDataToClientTypes;
+    }))
+    ?? new List<RemoteServiceErrorInfo>();
+
+var exceptions = remoteServiceErrorInfos.Any()
+    ? JsonSerializer.Serialize(remoteServiceErrorInfos, indented: true)
+    : null;
+```
+
+Multi-line comments produced by `AuditLogScope` are joined with `Environment.NewLine` so a single audit row carries the entire comment history for the request.
+
+## AuditingStore — the IAuditingStore implementation
+
+`AuditingStore` (`Volo.Abp.AuditLogging.Domain/Volo/Abp/AuditLogging/AuditingStore.cs`) is the entry point the runtime calls. It is `ITransientDependency` and `[Dependency(ReplaceServices = true)]` by virtue of its public type implementing the framework's `IAuditingStore`:
+
+```csharp
+// modules/audit-logging/src/Volo.Abp.AuditLogging.Domain/Volo/Abp/AuditLogging/AuditingStore.cs
+public class AuditingStore : IAuditingStore, ITransientDependency
+{
+    public ILogger<AuditingStore> Logger { get; set; }
+    protected IAuditLogRepository AuditLogRepository { get; }
+    protected IUnitOfWorkManager UnitOfWorkManager { get; }
+    protected AbpAuditingOptions Options { get; }
+    protected IAuditLogInfoToAuditLogConverter Converter { get; }
+
+    public virtual async Task SaveAsync(AuditLogInfo auditInfo)
+    {
+        if (!Options.HideErrors)
+        {
+            await SaveLogAsync(auditInfo);
+            return;
+        }
+
+        try
+        {
+            await SaveLogAsync(auditInfo);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning("Could not save the audit log object: " + Environment.NewLine + auditInfo.ToString());
+            Logger.LogException(ex, LogLevel.Error);
+        }
+    }
+
+    protected virtual async Task SaveLogAsync(AuditLogInfo auditInfo)
+    {
+        using (var uow = UnitOfWorkManager.Begin(true))
+        {
+            await AuditLogRepository.InsertAsync(await Converter.ConvertAsync(auditInfo));
+            await uow.CompleteAsync();
+        }
+    }
+}
+```
+
+Three things deserve attention:
+
+1. **Its own Unit Of Work.** `UnitOfWorkManager.Begin(true)` starts a *new transaction* that is completely independent of the request's outer UoW. This is essential — auditing must succeed even if the main UoW is rolling back due to an exception.
+2. **`HideErrors`.** When `AbpAuditingOptions.HideErrors == true` a write failure is swallowed and logged via `ILogger` rather than re-thrown. The default in many ABP startup templates is `true` so a downed audit database does not take the application offline.
+3. **No filtering.** `AuditingStore` does *not* decide whether to save — the auditing pipeline already filtered by `Selectors`, `IgnoredTypes` and per-method `[Audited]` / `[DisableAuditing]`. By the time `SaveAsync` is called, the row is meant to be persisted.
+
+<Warning>
+If you enable `HideErrors` you should also monitor `ILogger<AuditingStore>` separately — a misconfigured connection string to the audit DB will silently lose every audit row otherwise. See [Auditing](/infrastructure/auditing) for the full pipeline.
+</Warning>
+
+## Entity Framework Core persistence
+
+`Volo.Abp.AuditLogging.EntityFrameworkCore/Volo/Abp/AuditLogging/EntityFrameworkCore/AbpAuditLoggingDbContextModelBuilderExtensions.cs` defines all four tables. Three things matter: column lengths from the `*Consts` classes, the cascade child relationships, and the composite indexes that make admin queries fast:
+
+```csharp
+// modules/audit-logging/src/Volo.Abp.AuditLogging.EntityFrameworkCore/Volo/Abp/AuditLogging/EntityFrameworkCore/AbpAuditLoggingDbContextModelBuilderExtensions.cs
+builder.Entity<AuditLog>(b =>
+{
+    b.ToTable(AbpAuditLoggingDbProperties.DbTablePrefix + "AuditLogs",
+        AbpAuditLoggingDbProperties.DbSchema);
+    b.ConfigureByConvention();
+
+    b.Property(x => x.ApplicationName).HasMaxLength(AuditLogConsts.MaxApplicationNameLength);
+    b.Property(x => x.ClientIpAddress).HasMaxLength(AuditLogConsts.MaxClientIpAddressLength);
+    b.Property(x => x.UserName).HasMaxLength(AuditLogConsts.MaxUserNameLength);
+
+    b.HasMany(a => a.Actions).WithOne().HasForeignKey(x => x.AuditLogId).IsRequired();
+    b.HasMany(a => a.EntityChanges).WithOne().HasForeignKey(x => x.AuditLogId).IsRequired();
+
+    b.HasIndex(x => new { x.TenantId, x.ExecutionTime });
+    b.HasIndex(x => new { x.TenantId, x.UserId, x.ExecutionTime });
+
+    b.ApplyObjectExtensionMappings();
+});
+```
+
+The `(TenantId, ExecutionTime)` index is what makes "audit logs in the last 24 hours for tenant X" return in milliseconds rather than table-scans. The `(TenantId, UserId, ExecutionTime)` index covers "show me everything user Y did" queries.
+
+`AuditLogAction` and `EntityChange` carry their own composite indexes:
+
+```csharp
+// modules/audit-logging/src/Volo.Abp.AuditLogging.EntityFrameworkCore/Volo/Abp/AuditLogging/EntityFrameworkCore/AbpAuditLoggingDbContextModelBuilderExtensions.cs
+builder.Entity<AuditLogAction>(b =>
+{
+    b.ToTable(AbpAuditLoggingDbProperties.DbTablePrefix + "AuditLogActions", ...);
+
+    b.HasIndex(x => new { x.AuditLogId });
+    b.HasIndex(x => new { x.TenantId, x.ServiceName, x.MethodName, x.ExecutionTime });
+});
+
+builder.Entity<EntityChange>(b =>
+{
+    b.ToTable(AbpAuditLoggingDbProperties.DbTablePrefix + "EntityChanges", ...);
+
+    b.HasMany(a => a.PropertyChanges).WithOne().HasForeignKey(x => x.EntityChangeId);
+
+    b.HasIndex(x => new { x.AuditLogId });
+    b.HasIndex(x => new { x.TenantId, x.EntityTypeFullName, x.EntityId });
+});
+```
+
+The `(TenantId, EntityTypeFullName, EntityId)` index on `EntityChange` is what powers the "show me history for THIS entity" view — it lets the admin UI fetch every change ever made to e.g. `IdentityUser` id `abc` without scanning the audit log table.
+
+### EfCoreAuditLogRepository
+
+`EfCoreAuditLogRepository` extends `EfCoreRepository<IAuditLoggingDbContext, AuditLog, Guid>` and adds a *single* but very rich query method whose parameter list spans every filter the admin UI offers — date range, HTTP method, URL, client id, user, application, IP, correlation id, duration band, exception presence, status code, and pagination:
+
+```csharp
+// modules/audit-logging/src/Volo.Abp.AuditLogging.EntityFrameworkCore/Volo/Abp/AuditLogging/EntityFrameworkCore/EfCoreAuditLogRepository.cs
+public virtual async Task<List<AuditLog>> GetListAsync(
+    string sorting = null,
+    int maxResultCount = 50,
+    int skipCount = 0,
+    DateTime? startTime = null,
+    DateTime? endTime = null,
+    string httpMethod = null,
+    string url = null,
+    string clientId = null,
+    Guid? userId = null,
+    string userName = null,
+    string applicationName = null,
+    string clientIpAddress = null,
+    string correlationId = null,
+    int? maxExecutionDuration = null,
+    int? minExecutionDuration = null,
+    bool? hasException = null,
+    HttpStatusCode? httpStatusCode = null,
+    bool includeDetails = false,
+    CancellationToken cancellationToken = default)
+{
+    var query = await GetListQueryAsync(...);
+```
+
+The implementation builds an `IQueryable<AuditLog>` via `WhereIf` extensions and uses `System.Linq.Dynamic.Core` for the `OrderBy(sorting)` projection — so the `sorting` parameter is a `"ExecutionTime DESC"`-style string rather than an expression.
+
+See [Entity Framework Core](/data/entity-framework-core) for the `EfCoreRepository<,,>` base class and its `IDbContextProvider<T>` plumbing.
+
+## MongoDB persistence
+
+The MongoDB layer registers a single collection per aggregate; child entities are embedded as nested arrays inside `AuditLog`. `MongoAuditLogRepository` mirrors the EF repository's filter signature, exposing the same `GetListAsync` shape so callers can swap providers without code changes. See [MongoDB Integration](/data/mongodb-integration) for how `IMongoDbContextProvider<T>` resolves the context.
+
+## End-to-end flow
+
+1. A request hits a controller annotated with `[Audited]` (or audited by selector).
+2. `Volo.Abp.Auditing.AbpAuditingFilter` constructs an `AuditLogInfo` and pushes it into a per-request `IAuditingHelper`.
+3. Service-method interception fills out `Actions`; the EF/Mongo change-tracking integration fills out `EntityChanges`.
+4. At request completion `AbpAuditingFilter` calls `IAuditingStore.SaveAsync(auditLogInfo)`.
+5. `AuditingStore` opens a fresh transactional UoW, calls `AuditLogInfoToAuditLogConverter.ConvertAsync` to produce an `AuditLog`, and inserts it via `IAuditLogRepository`.
+6. The four EF tables (or one Mongo collection) record the request.
+
+<Tip>
+Because `AuditingStore` opens its *own* `IUnitOfWork`, the audit log row survives even when the business UoW is rolled back. This is critical — you want to know about a failed request, not just a successful one.
+</Tip>
+
+## Cross-module relationships
+
+<CardGroup cols={2}>
+  <Card title="Auditing infrastructure" href="/infrastructure/auditing">
+    Defines `IAuditingStore`, `AuditLogInfo`, `AuditLogScope`, the MVC filter and the EF Core change-tracking hooks that feed this module.
+  </Card>
+  <Card title="Identity Module" href="/modules/identity">
+    `IdentitySecurityLog` is a parallel append-only log that tracks login / lockout events; `IdentityUserDelegation` is what populates `ImpersonatorUserId` / `ImpersonatorUserName` on `AuditLog`.
+  </Card>
+  <Card title="EF Core integration" href="/data/entity-framework-core">
+    The four tables (`AbpAuditLogs`, `AbpAuditLogActions`, `AbpEntityChanges`, `AbpEntityPropertyChanges`) are configured via `ConfigureAuditLogging` and indexed for common admin queries.
+  </Card>
+  <Card title="MongoDB integration" href="/data/mongodb-integration">
+    The Mongo provider keeps the same `IAuditLogRepository` contract, with embedded child documents.
+  </Card>
+</CardGroup>
+
+## Summary
+
+The Audit Logging module is the persistent backbone of ABP's auditing story. A single `AuditLog` aggregate root plus three child entities — `AuditLogAction`, `EntityChange`, `EntityPropertyChange` — model an entire request's footprint. `AuditingStore` opens its own UoW so audit data survives business rollbacks; `AuditLogInfoToAuditLogConverter` cleanly separates the in-memory capture types from the persistence types; and the EF Core indexes are tuned for the queries an admin UI actually issues. Combined with the runtime pipeline in [Auditing](/infrastructure/auditing), the module gives ABP applications a complete who/what/when record without any application code change.

@@ -1,0 +1,527 @@
+---
+title: "Tenant Management Module — Tenant Aggregate & CRUD API"
+sidebarTitle: "Tenant Mgmt"
+description: "Volo.Abp.TenantManagement persists the Tenant aggregate with per-tenant connection strings, exposes a TenantStore implementation and a CRUD HTTP API."
+---
+
+The Tenant Management module under `modules/tenant-management/src/` is ABP Framework's reference implementation of the `ITenantStore` contract declared by the framework's [Multi-Tenancy](/multi-tenancy/overview) infrastructure. It owns the `Tenant` aggregate root, the `TenantManager` domain service that validates and renames tenants, the `TenantStore` cache layer that bridges to `Volo.Abp.MultiTenancy`, and a full CRUD application service exposed under `api/multi-tenancy/tenants`.
+
+This page walks through the source in `modules/tenant-management/src/` — the aggregate roots in `Volo.Abp.TenantManagement.Domain`, the `ITenantAppService` contract that drives the admin UI in `Volo.Abp.TenantManagement.Web` and `Volo.Abp.TenantManagement.Blazor`, and the EF Core / MongoDB persistence projects. It also covers how the module integrates with the [Feature Management](/modules/feature-management) module (so editions can carry feature defaults) and with the data layer's connection-string resolver so each tenant can have its own database.
+
+## Project layout
+
+```
+modules/tenant-management/src/
+├── Volo.Abp.TenantManagement.Domain.Shared/        TenantConsts, AbpTenantManagementDbProperties
+├── Volo.Abp.TenantManagement.Domain/                Tenant aggregate, TenantManager, TenantStore
+├── Volo.Abp.TenantManagement.Application.Contracts/ ITenantAppService + DTOs + permissions
+├── Volo.Abp.TenantManagement.Application/           TenantAppService
+├── Volo.Abp.TenantManagement.HttpApi/               TenantController
+├── Volo.Abp.TenantManagement.HttpApi.Client/        Dynamic C# proxies
+├── Volo.Abp.TenantManagement.EntityFrameworkCore/   TenantManagementDbContext, EfCoreTenantRepository
+├── Volo.Abp.TenantManagement.MongoDB/                TenantManagementMongoDbContext, MongoTenantRepository
+├── Volo.Abp.TenantManagement.Web/                    Razor Pages admin UI
+├── Volo.Abp.TenantManagement.Blazor[/Server/WebAssembly]/  Blazor admin UI
+└── Volo.Abp.TenantManagement.Installer/              NuGet meta-package
+```
+
+The layout follows the same DDD packaging used by [Identity](/modules/identity) and [Feature Management](/modules/feature-management); the only structural difference is the absence of a `*.AspNetCore` project — tenant management does not contribute claim contributors or a sign-in manager.
+
+## The Tenant aggregate root
+
+`Volo.Abp.TenantManagement.Domain/Volo/Abp/TenantManagement/Tenant.cs` defines the aggregate. It is `FullAuditedAggregateRoot<Guid>` so it picks up creation / modification / deletion audit columns from [DDD: Domain Entities & Aggregates](/ddd/domain-entities-and-aggregates), and it implements `IHasEntityVersion` for optimistic concurrency:
+
+```csharp
+// modules/tenant-management/src/Volo.Abp.TenantManagement.Domain/Volo/Abp/TenantManagement/Tenant.cs
+public class Tenant : FullAuditedAggregateRoot<Guid>, IHasEntityVersion
+{
+    public virtual string Name { get; protected set; }
+    public virtual string NormalizedName { get; protected set; }
+    public virtual int EntityVersion { get; protected set; }
+    public virtual List<TenantConnectionString> ConnectionStrings { get; protected set; }
+
+    protected internal Tenant(Guid id, [NotNull] string name, [CanBeNull] string normalizedName)
+        : base(id)
+    {
+        SetName(name);
+        SetNormalizedName(normalizedName);
+        ConnectionStrings = new List<TenantConnectionString>();
+    }
+}
+```
+
+A tenant is identified by `Guid Id`, exposes a display `Name` and a `NormalizedName` (used for case-insensitive lookup), and owns a collection of `TenantConnectionString` entities. The constructor is `protected internal` to force creation through `TenantManager.CreateAsync` — see the validation section below.
+
+### TenantConnectionString — the value-like child entity
+
+`TenantConnectionString` is a child entity (composite key on `TenantId, Name`), not an aggregate root. It carries the per-tenant override for a logically named connection string (for example `"Default"`, or a module-specific name like `"AbpAuditLogging"`):
+
+```csharp
+// modules/tenant-management/src/Volo.Abp.TenantManagement.Domain/Volo/Abp/TenantManagement/TenantConnectionString.cs
+public class TenantConnectionString : Entity
+{
+    public virtual Guid TenantId { get; protected set; }
+    public virtual string Name { get; protected set; }
+    public virtual string Value { get; protected set; }
+
+    public TenantConnectionString(Guid tenantId, [NotNull] string name, [NotNull] string value)
+    {
+        TenantId = tenantId;
+        Name = Check.NotNullOrWhiteSpace(name, nameof(name), TenantConnectionStringConsts.MaxNameLength);
+        SetValue(value);
+    }
+
+    public override object[] GetKeys()
+    {
+        return new object[] { TenantId, Name };
+    }
+}
+```
+
+The `Tenant` aggregate exposes a small collection-management API for those children — `FindConnectionString`, `SetConnectionString`, `SetDefaultConnectionString`, `RemoveConnectionString`, and convenience overloads that target the default name `Data.ConnectionStrings.DefaultConnectionStringName`:
+
+```csharp
+// modules/tenant-management/src/Volo.Abp.TenantManagement.Domain/Volo/Abp/TenantManagement/Tenant.cs
+public virtual string FindConnectionString(string name)
+{
+    return ConnectionStrings.FirstOrDefault(c => c.Name == name)?.Value;
+}
+
+public virtual void SetConnectionString(string name, string connectionString)
+{
+    var tenantConnectionString = ConnectionStrings.FirstOrDefault(x => x.Name == name);
+
+    if (tenantConnectionString != null)
+    {
+        tenantConnectionString.SetValue(connectionString);
+    }
+    else
+    {
+        ConnectionStrings.Add(new TenantConnectionString(Id, name, connectionString));
+    }
+}
+```
+
+<Note>
+A tenant with no per-tenant connection string falls back to the host's `appsettings.json` `ConnectionStrings:Default` value. ABP's `IConnectionStringResolver` walks the host configuration first if the tenant has no override — this is what lets you start a tenant on the shared host database and migrate to a dedicated DB later without code changes.
+</Note>
+
+## TenantManager — domain service
+
+`TenantManager` is the only sanctioned way to construct or rename a tenant. It is a `DomainService` so it gets `IGuidGenerator`, `ILoggerFactory` and other framework basics from its base class:
+
+```csharp
+// modules/tenant-management/src/Volo.Abp.TenantManagement.Domain/Volo/Abp/TenantManagement/TenantManager.cs
+public class TenantManager : DomainService, ITenantManager
+{
+    protected ITenantValidator TenantValidator { get; }
+    protected ITenantNormalizer TenantNormalizer { get; }
+    protected ILocalEventBus LocalEventBus { get; }
+
+    public virtual async Task<Tenant> CreateAsync(string name)
+    {
+        Check.NotNull(name, nameof(name));
+
+        var tenant = new Tenant(GuidGenerator.Create(), name, TenantNormalizer.NormalizeName(name));
+        await TenantValidator.ValidateAsync(tenant);
+        return tenant;
+    }
+
+    public virtual async Task ChangeNameAsync(Tenant tenant, string name)
+    {
+        Check.NotNull(tenant, nameof(tenant));
+        Check.NotNull(name, nameof(name));
+
+        await LocalEventBus.PublishAsync(new TenantChangedEvent(tenant.Id, tenant.NormalizedName));
+
+        tenant.SetName(name);
+        tenant.SetNormalizedName(TenantNormalizer.NormalizeName(name));
+        await TenantValidator.ValidateAsync(tenant);
+    }
+}
+```
+
+Two design choices matter here. First, `ChangeNameAsync` publishes a `TenantChangedEvent` on the local event bus *before* the rename actually happens — the cache invalidation handler `TenantConfigurationCacheItemInvalidator` listens for this event and clears the `(id, oldNormalizedName)` cache entries so the next lookup misses the cache and rebuilds it. Second, `TenantValidator.ValidateAsync` runs *after* both `SetName` calls in `ChangeNameAsync`, allowing the name change to be rejected as a whole transaction.
+
+### AbpTenantValidator — uniqueness guard
+
+`AbpTenantValidator` enforces the global "unique normalized name" invariant by querying `ITenantRepository`:
+
+```csharp
+// modules/tenant-management/src/Volo.Abp.TenantManagement.Domain/Volo/Abp/TenantManagement/AbpTenantValidator.cs
+public virtual async Task ValidateAsync(Tenant tenant)
+{
+    Check.NotNullOrWhiteSpace(tenant.Name, nameof(tenant.Name));
+    Check.NotNullOrWhiteSpace(tenant.NormalizedName, nameof(tenant.NormalizedName));
+
+    var owner = await TenantRepository.FindByNameAsync(tenant.NormalizedName);
+    if (owner != null && owner.Id != tenant.Id)
+    {
+        throw new BusinessException("Volo.Abp.TenantManagement:DuplicateTenantName")
+            .WithData("Name", tenant.NormalizedName);
+    }
+}
+```
+
+The error code `Volo.Abp.TenantManagement:DuplicateTenantName` is mapped to a localized message via `AbpExceptionLocalizationOptions.MapCodeNamespace` in `AbpTenantManagementDomainModule`, so the UI receives a translated message rather than a raw exception.
+
+## TenantStore — the bridge to Volo.Abp.MultiTenancy
+
+The framework's `ICurrentTenant` resolution funnels through `ITenantStore.FindAsync(id)` / `FindAsync(normalizedName)`. `Volo.Abp.TenantManagement.Domain/Volo/Abp/TenantManagement/TenantStore.cs` is the module's implementation, layered with a `IDistributedCache<TenantConfigurationCacheItem>` so a single lookup per tenant suffices across the lifetime of a request:
+
+```csharp
+// modules/tenant-management/src/Volo.Abp.TenantManagement.Domain/Volo/Abp/TenantManagement/TenantStore.cs
+public class TenantStore : ITenantStore, ITransientDependency
+{
+    protected virtual async Task<TenantConfigurationCacheItem> GetCacheItemAsync(Guid? id, string normalizedName)
+    {
+        var cacheKey = CalculateCacheKey(id, normalizedName);
+
+        var cacheItem = await Cache.GetAsync(cacheKey, considerUow: true);
+        if (cacheItem?.Value != null) { return cacheItem; }
+
+        if (id.HasValue)
+        {
+            using (CurrentTenant.Change(null))
+            {
+                var tenant = await TenantRepository.FindAsync(id.Value);
+                return await SetCacheAsync(cacheKey, tenant);
+            }
+        }
+
+        if (!normalizedName.IsNullOrWhiteSpace())
+        {
+            using (CurrentTenant.Change(null))
+            {
+                var tenant = await TenantRepository.FindByNameAsync(normalizedName);
+                return await SetCacheAsync(cacheKey, tenant);
+            }
+        }
+
+        throw new AbpException("Both id and normalizedName can't be invalid.");
+    }
+}
+```
+
+Two important details:
+
+1. **`using (CurrentTenant.Change(null))`** — the lookup is performed in the host context. Without this guard the `[TenantId]` data filter applied by EF Core would scope the query to the current tenant and return `null` for any cross-tenant lookup, breaking tenant resolution from the host side.
+2. **`considerUow: true`** — the cache participates in the active Unit of Work. A tenant created in the same UoW as a feature/permission assignment becomes cacheable only after the UoW commits, so admin operations that mix tenant creation and side-effects stay consistent.
+
+`SetCacheAsync` maps `Tenant` to the framework type `TenantConfiguration` through `IObjectMapper<AbpTenantManagementDomainModule>` (declared via Mapperly in `AbpTenantManagementDomainMapperlyMappers`) — the framework deliberately does not know about the domain `Tenant` class; it sees only `TenantConfiguration`.
+
+<Tip>
+Because `TenantStore` is `ITransientDependency` but `Cache` is distributed, you can scale out the app servers without "stale tenant" headaches — invalidation flows through the local event bus inside one process, and through Redis/Memcached's distributed cache between processes.
+</Tip>
+
+## Application service contract
+
+`ITenantAppService` extends ABP's generic CRUD application service contract, then adds three connection-string operations:
+
+```csharp
+// modules/tenant-management/src/Volo.Abp.TenantManagement.Application.Contracts/Volo/Abp/TenantManagement/ITenantAppService.cs
+public interface ITenantAppService : ICrudAppService<TenantDto, Guid, GetTenantsInput, TenantCreateDto, TenantUpdateDto>
+{
+    Task<string> GetDefaultConnectionStringAsync(Guid id);
+    Task UpdateDefaultConnectionStringAsync(Guid id, string defaultConnectionString);
+    Task DeleteDefaultConnectionStringAsync(Guid id);
+}
+```
+
+`ICrudAppService` resolves to `GetAsync`, `GetListAsync`, `CreateAsync`, `UpdateAsync`, `DeleteAsync` — for the full signatures see `Volo.Abp.Application.Services.ICrudAppService` in the framework. `TenantCreateDto` carries `Name`, `AdminEmailAddress`, `AdminPassword`; `TenantUpdateDto` carries just `Name` and the `ConcurrencyStamp` used for optimistic concurrency.
+
+### Permissions
+
+`TenantManagementPermissions` declares the policies that gate every endpoint:
+
+```csharp
+// modules/tenant-management/src/Volo.Abp.TenantManagement.Application.Contracts/Volo/Abp/TenantManagement/TenantManagementPermissions.cs
+public static class TenantManagementPermissions
+{
+    public const string GroupName = "AbpTenantManagement";
+
+    public static class Tenants
+    {
+        public const string Default = GroupName + ".Tenants";
+        public const string Create = Default + ".Create";
+        public const string Update = Default + ".Update";
+        public const string Delete = Default + ".Delete";
+        public const string ManageFeatures = Default + ".ManageFeatures";
+        public const string ManageConnectionStrings = Default + ".ManageConnectionStrings";
+    }
+}
+```
+
+`ManageFeatures` is the same constant the [Feature Management module](/modules/feature-management) wires into `FeatureManagementOptions.ProviderPolicies[TenantFeatureValueProvider.ProviderName]` — that single string is the entire authorisation contract between the two modules. See [Permissions](/security/permissions) for how these constants are materialised into `PermissionGrant` rows by the permission management module.
+
+## TenantAppService — implementation
+
+`TenantAppService` (`Volo.Abp.TenantManagement.Application/Volo/Abp/TenantManagement/TenantAppService.cs`) is fully `[Authorize]`-gated. Each mutation publishes the right distributed/local event so other bounded contexts can react.
+
+### Create
+
+The interesting part of `CreateAsync` is the cross-module hand-off: after the tenant row is inserted, the app service switches `ICurrentTenant` to the new tenant and calls `IDataSeeder.SeedAsync` so module seeders (Identity admin user, default roles, default permission grants…) populate the per-tenant state:
+
+```csharp
+// modules/tenant-management/src/Volo.Abp.TenantManagement.Application/Volo/Abp/TenantManagement/TenantAppService.cs
+[Authorize(TenantManagementPermissions.Tenants.Create)]
+public virtual async Task<TenantDto> CreateAsync(TenantCreateDto input)
+{
+    var tenant = await TenantManager.CreateAsync(input.Name);
+    input.MapExtraPropertiesTo(tenant);
+
+    await TenantRepository.InsertAsync(tenant);
+    await CurrentUnitOfWork.SaveChangesAsync();
+
+    await DistributedEventBus.PublishAsync(
+        new TenantCreatedEto
+        {
+            Id = tenant.Id,
+            Name = tenant.Name,
+            Properties =
+            {
+                { "AdminEmail", input.AdminEmailAddress },
+                { "AdminPassword", input.AdminPassword }
+            }
+        });
+
+    using (CurrentTenant.Change(tenant.Id, tenant.Name))
+    {
+        await DataSeeder.SeedAsync(
+            new DataSeedContext(tenant.Id)
+                .WithProperty("AdminEmail", input.AdminEmailAddress)
+                .WithProperty("AdminPassword", input.AdminPassword)
+        );
+    }
+
+    return ObjectMapper.Map<Tenant, TenantDto>(tenant);
+}
+```
+
+The distributed `TenantCreatedEto` is what allows downstream microservices to learn about the new tenant — typical handlers include creating a default identity admin in a dedicated identity service or a billing account in a billing service.
+
+### Update / Delete
+
+`UpdateAsync` calls `TenantManager.ChangeNameAsync` (which publishes the local `TenantChangedEvent` for cache invalidation) and applies the `ConcurrencyStamp`. `DeleteAsync` is intentionally lenient — `FindAsync` returning `null` is a no-op rather than a 404, so a double-delete from the UI is harmless:
+
+```csharp
+// modules/tenant-management/src/Volo.Abp.TenantManagement.Application/Volo/Abp/TenantManagement/TenantAppService.cs
+[Authorize(TenantManagementPermissions.Tenants.Update)]
+public virtual async Task<TenantDto> UpdateAsync(Guid id, TenantUpdateDto input)
+{
+    var tenant = await TenantRepository.GetAsync(id);
+    await TenantManager.ChangeNameAsync(tenant, input.Name);
+    tenant.SetConcurrencyStampIfNotNull(input.ConcurrencyStamp);
+    input.MapExtraPropertiesTo(tenant);
+    await TenantRepository.UpdateAsync(tenant);
+    return ObjectMapper.Map<Tenant, TenantDto>(tenant);
+}
+
+[Authorize(TenantManagementPermissions.Tenants.Delete)]
+public virtual async Task DeleteAsync(Guid id)
+{
+    var tenant = await TenantRepository.FindAsync(id);
+    if (tenant == null) { return; }
+    await TenantRepository.DeleteAsync(tenant);
+}
+```
+
+Because `Tenant` is `FullAuditedAggregateRoot<Guid>`, `DeleteAsync` produces a soft delete (`IsDeleted = true`) rather than a hard `DELETE`, matching the rest of the audited-aggregate convention.
+
+### Connection string endpoints
+
+The three connection-string methods are gated by `ManageConnectionStrings` and publish `TenantChangedEvent` so the connection string cache held by `ITenantStore` is refreshed:
+
+```csharp
+// modules/tenant-management/src/Volo.Abp.TenantManagement.Application/Volo/Abp/TenantManagement/TenantAppService.cs
+[Authorize(TenantManagementPermissions.Tenants.ManageConnectionStrings)]
+public virtual async Task UpdateDefaultConnectionStringAsync(Guid id, string defaultConnectionString)
+{
+    var tenant = await TenantRepository.GetAsync(id);
+    if (tenant.FindDefaultConnectionString() != defaultConnectionString)
+    {
+        await LocalEventBus.PublishAsync(new TenantChangedEvent(tenant.Id, tenant.NormalizedName));
+    }
+    tenant.SetDefaultConnectionString(defaultConnectionString);
+    await TenantRepository.UpdateAsync(tenant);
+}
+
+[Authorize(TenantManagementPermissions.Tenants.ManageConnectionStrings)]
+public virtual async Task DeleteDefaultConnectionStringAsync(Guid id)
+{
+    var tenant = await TenantRepository.GetAsync(id);
+    tenant.RemoveDefaultConnectionString();
+    await LocalEventBus.PublishAsync(new TenantChangedEvent(tenant.Id, tenant.NormalizedName));
+    await TenantRepository.UpdateAsync(tenant);
+}
+```
+
+The fact that the event is only published when the value actually changes (in `UpdateDefaultConnectionStringAsync`) is a small but important optimisation — re-saving the same value does not flush other caches.
+
+## HTTP API
+
+`TenantController` in `Volo.Abp.TenantManagement.HttpApi` exposes the CRUD contract under `api/multi-tenancy/tenants` and three connection-string endpoints under `{id}/default-connection-string`:
+
+```csharp
+// modules/tenant-management/src/Volo.Abp.TenantManagement.HttpApi/Volo/Abp/TenantManagement/TenantController.cs
+[Controller]
+[RemoteService(Name = TenantManagementRemoteServiceConsts.RemoteServiceName)]
+[Area(TenantManagementRemoteServiceConsts.ModuleName)]
+[Route("api/multi-tenancy/tenants")]
+public class TenantController : AbpControllerBase, ITenantAppService
+{
+    [HttpGet, Route("{id}")]
+    public virtual Task<TenantDto> GetAsync(Guid id) => TenantAppService.GetAsync(id);
+
+    [HttpGet]
+    public virtual Task<PagedResultDto<TenantDto>> GetListAsync(GetTenantsInput input)
+        => TenantAppService.GetListAsync(input);
+
+    [HttpPost]
+    public virtual Task<TenantDto> CreateAsync(TenantCreateDto input)
+    {
+        ValidateModel();
+        return TenantAppService.CreateAsync(input);
+    }
+
+    [HttpPut, Route("{id}")]
+    public virtual Task<TenantDto> UpdateAsync(Guid id, TenantUpdateDto input)
+        => TenantAppService.UpdateAsync(id, input);
+
+    [HttpDelete, Route("{id}")]
+    public virtual Task DeleteAsync(Guid id) => TenantAppService.DeleteAsync(id);
+
+    [HttpGet, Route("{id}/default-connection-string")]
+    public virtual Task<string> GetDefaultConnectionStringAsync(Guid id)
+        => TenantAppService.GetDefaultConnectionStringAsync(id);
+
+    [HttpPut, Route("{id}/default-connection-string")]
+    public virtual Task UpdateDefaultConnectionStringAsync(Guid id, string defaultConnectionString)
+        => TenantAppService.UpdateDefaultConnectionStringAsync(id, defaultConnectionString);
+
+    [HttpDelete, Route("{id}/default-connection-string")]
+    public virtual Task DeleteDefaultConnectionStringAsync(Guid id)
+        => TenantAppService.DeleteDefaultConnectionStringAsync(id);
+}
+```
+
+| Verb | Route | Auth | App service method |
+| --- | --- | --- | --- |
+| `GET` | `api/multi-tenancy/tenants/{id}` | `Tenants.Default` | `GetAsync` |
+| `GET` | `api/multi-tenancy/tenants` | `Tenants.Default` | `GetListAsync` |
+| `POST` | `api/multi-tenancy/tenants` | `Tenants.Create` | `CreateAsync` |
+| `PUT` | `api/multi-tenancy/tenants/{id}` | `Tenants.Update` | `UpdateAsync` |
+| `DELETE` | `api/multi-tenancy/tenants/{id}` | `Tenants.Delete` | `DeleteAsync` |
+| `GET` | `api/multi-tenancy/tenants/{id}/default-connection-string` | `Tenants.ManageConnectionStrings` | `GetDefaultConnectionStringAsync` |
+| `PUT` | `api/multi-tenancy/tenants/{id}/default-connection-string` | `Tenants.ManageConnectionStrings` | `UpdateDefaultConnectionStringAsync` |
+| `DELETE` | `api/multi-tenancy/tenants/{id}/default-connection-string` | `Tenants.ManageConnectionStrings` | `DeleteDefaultConnectionStringAsync` |
+
+The TODO comment on the class — *"Throws exception on validation if we inherit from Controller"* — is a known historical reason the controller does not inherit from `Controller` directly; ABP's `AbpControllerBase` gives the same MVC primitives without the side-effect.
+
+## Entity Framework Core persistence
+
+`Volo.Abp.TenantManagement.EntityFrameworkCore/Volo/Abp/TenantManagement/EntityFrameworkCore/AbpTenantManagementDbContextModelCreatingExtensions.cs` configures two tables — `AbpTenants` and `AbpTenantConnectionStrings`:
+
+```csharp
+// modules/tenant-management/src/Volo.Abp.TenantManagement.EntityFrameworkCore/Volo/Abp/TenantManagement/EntityFrameworkCore/AbpTenantManagementDbContextModelCreatingExtensions.cs
+builder.Entity<Tenant>(b =>
+{
+    b.ToTable(AbpTenantManagementDbProperties.DbTablePrefix + "Tenants",
+        AbpTenantManagementDbProperties.DbSchema);
+    b.ConfigureByConvention();
+
+    b.Property(t => t.Name).IsRequired().HasMaxLength(TenantConsts.MaxNameLength);
+    b.Property(t => t.NormalizedName).IsRequired().HasMaxLength(TenantConsts.MaxNameLength);
+
+    b.HasMany(u => u.ConnectionStrings).WithOne().HasForeignKey(uc => uc.TenantId).IsRequired();
+
+    b.HasIndex(u => u.Name);
+    b.HasIndex(u => u.NormalizedName);
+
+    b.ApplyObjectExtensionMappings();
+});
+
+builder.Entity<TenantConnectionString>(b =>
+{
+    b.ToTable(AbpTenantManagementDbProperties.DbTablePrefix + "TenantConnectionStrings",
+        AbpTenantManagementDbProperties.DbSchema);
+    b.ConfigureByConvention();
+
+    b.HasKey(x => new { x.TenantId, x.Name });
+
+    b.Property(cs => cs.Name).IsRequired().HasMaxLength(TenantConnectionStringConsts.MaxNameLength);
+    b.Property(cs => cs.Value).IsRequired().HasMaxLength(TenantConnectionStringConsts.MaxValueLength);
+
+    b.ApplyObjectExtensionMappings();
+});
+```
+
+Note the composite key `(TenantId, Name)` on `TenantConnectionString` — there is no surrogate `Id`. Two indexes on `Tenant` cover both display-name search and normalized-name lookup, which is what the `EfCoreTenantRepository` query paths exercise. See [Entity Framework Core](/data/entity-framework-core) for `ConfigureByConvention()` and the object-extension story.
+
+The repository is a standard EF Core `EfCoreRepository<TDbContext, Tenant, Guid>` that adds tenant-specific queries:
+
+| Repository method | Purpose |
+| --- | --- |
+| `FindByNameAsync(normalizedName, includeDetails, ct)` | The lookup the `TenantStore` uses for cache misses by name |
+| `FindAsync(id)` | Inherited — used for cache misses by id |
+| `GetListAsync(sorting, maxResultCount, skipCount, filter, includeDetails, ct)` | The CRUD list endpoint |
+| `GetCountAsync(filter)` | The CRUD list total |
+
+## MongoDB persistence
+
+The MongoDB layer mirrors EF. `Volo.Abp.TenantManagement.MongoDB/Volo/Abp/TenantManagement/MongoDb/AbpTenantManagementMongoDbContextExtensions.cs` registers the single `AbpTenants` collection (Mongo embeds the `ConnectionStrings` as a sub-document of the tenant rather than a separate collection):
+
+```csharp
+// modules/tenant-management/src/Volo.Abp.TenantManagement.MongoDB/Volo/Abp/TenantManagement/MongoDb/AbpTenantManagementMongoDbContextExtensions.cs
+public static void ConfigureTenantManagement(this IMongoModelBuilder builder)
+{
+    Check.NotNull(builder, nameof(builder));
+
+    builder.Entity<Tenant>(b =>
+    {
+        b.CollectionName = AbpTenantManagementDbProperties.DbTablePrefix + "Tenants";
+    });
+}
+```
+
+The `MongoTenantRepository.FindByNameAsync` query uses `MongoDB.Driver.Linq` for asynchronous LINQ:
+
+```csharp
+// modules/tenant-management/src/Volo.Abp.TenantManagement.MongoDB/Volo/Abp/TenantManagement/MongoDb/MongoTenantRepository.cs
+public virtual async Task<Tenant> FindByNameAsync(
+    string normalizedName,
+    bool includeDetails = true,
+    CancellationToken cancellationToken = default)
+{
+    return await (await GetQueryableAsync(cancellationToken))
+        .FirstOrDefaultAsync(t => t.NormalizedName == normalizedName,
+            GetCancellationToken(cancellationToken));
+}
+```
+
+See [MongoDB Integration](/data/mongodb-integration) for how the document-style storage handles `ConnectionStrings` as a nested array rather than a foreign-key table.
+
+## Interactions with other modules
+
+<CardGroup cols={2}>
+  <Card title="Multi-Tenancy" href="/multi-tenancy/overview">
+    `TenantStore` implements `ITenantStore`, the contract `ICurrentTenant` resolution consumes.
+  </Card>
+  <Card title="Feature Management" href="/modules/feature-management">
+    The `EditionFeatureManagementProvider` calls `ITenantStore.FindAsync(tenantId)` to read `EditionId`, then resolves edition-level feature values.
+  </Card>
+  <Card title="Permissions" href="/security/permissions">
+    The five `TenantManagementPermissions.Tenants.*` constants gate every endpoint.
+  </Card>
+  <Card title="Domain Entities & Aggregates" href="/ddd/domain-entities-and-aggregates">
+    `FullAuditedAggregateRoot` and the `IHasEntityVersion` interface come from the DDD building blocks.
+  </Card>
+</CardGroup>
+
+<Warning>
+Deleting a tenant marks the `Tenant` aggregate as `IsDeleted = true` but does *not* delete data in tenant-scoped tables — those rows are filtered by `[TenantId]` data filters and are simply orphaned. A "physical purge" requires either a custom `IDataSeeder`-style cleanup job or `unfiltered` queries to remove tenant data; the framework does not do this automatically because tenant databases may be on separate servers.
+</Warning>
+
+## Summary
+
+The Tenant Management module is small but pivotal: a single `Tenant` aggregate root with a child `TenantConnectionString` entity, a `TenantManager` domain service that mints and validates them, a `TenantStore` that caches `TenantConfiguration` lookups and bridges to `Volo.Abp.MultiTenancy`, and a CRUD HTTP API at `api/multi-tenancy/tenants` gated by five permissions. Its surface area is intentionally small because *everything else* in the framework reads tenants through `ITenantStore` — once you understand this module you understand the boundary that the rest of ABP's modules cross to reach tenant-specific configuration.

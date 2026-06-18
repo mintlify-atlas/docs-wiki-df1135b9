@@ -1,0 +1,371 @@
+---
+title: "Repository Layout: Folders, Solutions and 169 Packages"
+sidebarTitle: "Repository Layout"
+description: "Annotated tree of the abpframework/abp monorepo — framework, modules, templates, npm, build, deploy, tools, docs and a per-prefix tour of framework/src."
+---
+
+The ABP Framework is developed as a single Git monorepo whose root contains sixteen top-level folders and seven build/config files. This page is the field guide to that tree: what lives where, how `framework/` relates to `modules/`, where the `.slnx` solutions and `.abpsln` ABP-Studio solutions sit, and how the ~169 `Volo.Abp.*` packages under `framework/src/` are clustered by prefix. Treat it as the index you reach for before opening a file.
+
+The repository is rooted at the GitHub slug `abpframework/abp` (declared in `Directory.Build.props` via `<RepositoryUrl>https://github.com/abpframework/abp/</RepositoryUrl>`). Every top-level folder is independent enough to open in its own IDE window — there is no single uber-solution that pulls in every project. Instead, `build/common.ps1` lists the solutions that the CI script walks in order. See [/overview/solution-and-build](/overview/solution-and-build) for the build orchestration and [/overview/architecture](/overview/architecture) for the nine logical layers those solutions implement.
+
+<Note>
+  The numbers in this page (e.g. "169 packages under `framework/src/`",
+  "38 `Volo.Abp.AspNetCore.*` packages") were extracted by listing the
+  directories directly — they will drift slightly between releases as new
+  providers (Bunny CDN storage, TickerQ, etc.) land. They are accurate as of
+  the `dev` branch snapshot used to author this wiki.
+</Note>
+
+## Top-Level Tree
+
+```
+abp/
+├── framework/          # Core framework — 169 src packages
+├── modules/            # 19 application modules (Identity, CmsKit, ...)
+├── templates/          # Startup templates (app, app-nolayers, module, console, maui, wpf)
+├── npm/                # JavaScript packages (Angular + MVC bundles)
+├── studio/             # Source-code mirrors used by ABP Studio
+├── source-code/        # SourceCode projects (paid-module snapshots)
+├── build/              # PowerShell CI scripts (build-all, test-all)
+├── deploy/             # Numbered release scripts (NuGet pack/push, npm publish)
+├── tools/              # Misc dev tooling (changelog generator, nuget.exe)
+├── docs/               # Markdown documentation site (en/)
+├── ai-rules/           # .mdc rule files for AI coding assistants
+├── apiSpec/            # XML-doc supplements for DocFX
+├── test/               # Integration smoke tests (perf, distributed events)
+├── nupkg/              # Local pack/push scripts (NuGet packaging)
+├── lowcode/            # ABP Suite / Studio low-code JSON schema
+├── abp_io/             # Localization strings used by abp.io website
+├── Directory.Build.props           # Global MSBuild props (test detection)
+├── Directory.Packages.props        # Central Package Management
+├── common.props                    # Per-package metadata (Version, License, Tags)
+├── common.test.props               # Test project shared MSBuild props
+├── configureawait.props            # Fody ConfigureAwait weaver
+├── global.json                     # Pinned .NET SDK
+├── NuGet.Config                    # NuGet sources (nuget.org only)
+├── latest-versions.json            # Release manifest for abp.io
+├── codecov.yml                     # Codecov configuration
+├── delete-bin-obj.ps1              # Convenience cleanup script
+└── README.md / NuGet.md / SECURITY.md / LICENSE.md / CODE_OF_CONDUCT.md
+```
+
+## Top-Level Folder Catalog
+
+The table below summarizes every top-level directory. Detailed sections follow.
+
+| Folder | Purpose | Key entry points |
+|---|---|---|
+| `framework/` | The framework itself: `Volo.Abp.Core`, DI, modularity, EFCore, MongoDB, ASP.NET Core integration. | `framework/Volo.Abp.slnx`, `framework/src/`, `framework/test/` |
+| `modules/` | 19 reusable application modules — Identity, OpenIddict, CmsKit, Account, etc. | `modules/identity/Volo.Abp.Identity.slnx`, `modules/cms-kit/`, `modules/openiddict/` |
+| `templates/` | Startup templates rendered by the CLI / ABP Studio. | `templates/app/aspnet-core/`, `templates/app/angular/`, `templates/module/`, `templates/console/`, `templates/maui/`, `templates/wpf/`, `templates/app-nolayers/`, `templates/zip-templates.ps1` |
+| `npm/` | JavaScript side of the framework — Angular packages and MVC bundles. | `npm/ng-packs/package.json`, `npm/packs/`, `npm/lerna.json`, `npm/publish-mvc.ps1`, `npm/publish-ng.ps1` |
+| `studio/` | Source-code mirrors that ABP Studio's "Get Source Code" feature checks out. | `studio/source-codes/Volo.Abp.Identity.SourceCode/`, plus 17 others |
+| `source-code/` | The same source-code projects compiled as a normal solution for paid customers. | `source-code/SourceCodes.slnx` |
+| `build/` | PowerShell CI build orchestration — walks every solution and runs `dotnet build` / `dotnet test`. | `build/common.ps1`, `build/build-all.ps1`, `build/build-all-release.ps1`, `build/test-all.ps1` |
+| `deploy/` | Numbered release pipeline scripts (`1-fetch-and-build.ps1` … `8-download-release-zip.ps1`). | `deploy/_run_all.ps1`, `deploy/new-github-release-function.psm1` |
+| `tools/` | Standalone helper executables. | `tools/nuget/nuget.exe`, `tools/github-changelog-generator/`, `tools/localization-key-synchronizer/`, `tools/smtp-prober-email-sender.exe` |
+| `docs/` | The user-facing documentation site (English markdown + JSON nav). | `docs/en/docs-nav.json`, `docs/en/framework/`, `docs/en/modules/`, `docs/en/tutorials/` (rendered at abp.io/docs) |
+| `ai-rules/` | `.mdc` rule files consumed by Cursor / Claude Code / Copilot. | `ai-rules/common/abp-core.mdc`, `ai-rules/data/ef-core.mdc`, `ai-rules/ui/angular.mdc` |
+| `apiSpec/` | Manual XML-doc supplements that DocFX merges into the API reference. | `apiSpec/Microsoft_AspNetCore_Routing_AbpEndpointRouterOptions.md` |
+| `test/` | Standalone integration test apps (perf + distributed events smoke harness). | `test/AbpPerfTest/`, `test/DistEvents/` |
+| `nupkg/` | Local NuGet packaging — pack every project into a single output folder. | `nupkg/pack.ps1`, `nupkg/push_packages.ps1`, `nupkg/push-nightly-packages-myget.ps1`, `nupkg/unit_test.ps1`, `nupkg/common.ps1` |
+| `lowcode/` | JSON schema for ABP Suite / Studio low-code model files (`.abpentity`, etc.). | `lowcode/schema/model.schema.json`, `lowcode/schema/definitions/` |
+| `abp_io/` | Localization assets shipped to the abp.io website. | `abp_io/AbpIoLocalization.slnx`, `abp_io/AbpIoLocalization/` |
+
+## `framework/` — the core framework
+
+`framework/` is the heart of the repo. It contains:
+
+- `framework/Volo.Abp.slnx` — modern XML solution file listing every `src/` and `test/` project.
+- `framework/Volo.Abp.abpsln` — ABP Studio solution descriptor (JSON, `template: empty`, references `Volo.Abp.abpmdl`).
+- `framework/Volo.Abp.abpmdl` — ABP Studio module descriptor.
+- `framework/Volo.Abp.sln.DotSettings` — ReSharper team-shared settings.
+- `framework/NuGet.md` — the README that ends up packed into every `Volo.Abp.*` `.nupkg`.
+- `framework/src/` — 169 NuGet-shipped packages, see the next section.
+- `framework/test/` — 95+ xUnit test projects mirroring `src/` (e.g. `Volo.Abp.Auditing.Tests/`, `Volo.Abp.EntityFrameworkCore.Tests/`, plus the cross-cutting `AbpTestBase/`).
+
+The framework has zero dependency on the `modules/` folder — application modules are downstream consumers.
+
+## `framework/src/` — 169 NuGet packages by prefix
+
+Every direct child of `framework/src/` is a single NuGet package that ships as `Volo.Abp.<Suffix>` and exports one `AbpModule` class. The table below clusters them by name prefix; counts are exact at the snapshot used here.
+
+| Cluster | Count | Representative packages | Wiki |
+|---|---|---|---|
+| `Volo.Abp.Core` + `Volo.Abp` | 2 | `Volo.Abp.Core` (modularity, DI, exception handling); `Volo.Abp` (the all-in-one umbrella package) | [/core/overview](/core/overview) |
+| `Volo.Abp.AspNetCore.*` | 38 | `Volo.Abp.AspNetCore`, `Volo.Abp.AspNetCore.Mvc`, `Volo.Abp.AspNetCore.Mvc.UI.Theme.Shared`, `Volo.Abp.AspNetCore.SignalR`, `Volo.Abp.AspNetCore.Components.WebAssembly`, `Volo.Abp.AspNetCore.Components.MauiBlazor`, plus 16 Mvc-prefixed packages and 12 Components-prefixed packages | [/aspnetcore/overview](/aspnetcore/overview), [/blazor/overview](/blazor/overview) |
+| `Volo.Abp.EntityFrameworkCore.*` | 8 | `Volo.Abp.EntityFrameworkCore` (provider-neutral base) + `.MySQL`, `.MySQL.Pomelo`, `.Oracle`, `.Oracle.Devart`, `.PostgreSql`, `.Sqlite`, `.SqlServer` | [/data/entity-framework-core](/data/entity-framework-core) |
+| `Volo.Abp.EventBus.*` | 7 | `Volo.Abp.EventBus`, `.Abstractions`, `.Azure`, `.Dapr`, `.Kafka`, `.RabbitMQ`, `.Rebus` | [/infrastructure/event-bus](/infrastructure/event-bus) |
+| `Volo.Abp.BlobStoring.*` | 9 | `Volo.Abp.BlobStoring`, `.Aliyun`, `.Aws`, `.Azure`, `.Bunny`, `.FileSystem`, `.Google`, `.Memory`, `.Minio` | [/infrastructure/blob-storing](/infrastructure/blob-storing) |
+| `Volo.Abp.BackgroundJobs.*` + `Volo.Abp.BackgroundWorkers.*` | 10 | `BackgroundJobs` (default queue), `.Abstractions`, `.HangFire`, `.Quartz`, `.RabbitMQ`, `.TickerQ`; `BackgroundWorkers`, `.Hangfire`, `.Quartz`, `.TickerQ` | [/infrastructure/background-jobs-and-workers](/infrastructure/background-jobs-and-workers) |
+| `Volo.Abp.Http.*` + `Volo.Abp.IdentityModel` | 9 | `Http`, `.Abstractions`, `.Client`, `.Client.Dapr`, `.Client.IdentityModel`, `.Client.IdentityModel.Web/.MauiBlazor/.WebAssembly`, `.Client.Web` | [/infrastructure/http-client-and-remote-services](/infrastructure/http-client-and-remote-services) |
+| `Volo.Abp.TextTemplating.*` | 4 | `TextTemplating`, `.Core`, `.Razor`, `.Scriban` | [/infrastructure/text-templating](/infrastructure/text-templating) |
+| `Volo.Abp.Imaging.*` | 5 | `.Abstractions`, `.AspNetCore`, `.ImageSharp`, `.MagickNet`, `.SkiaSharp` | [/infrastructure/imaging](/infrastructure/imaging) |
+| `Volo.Abp.Caching.*` | 2 | `Volo.Abp.Caching`, `.StackExchangeRedis` | [/infrastructure/caching](/infrastructure/caching) |
+| `Volo.Abp.Auditing.*` | 2 | `Volo.Abp.Auditing`, `Volo.Abp.Auditing.Contracts` | [/crosscutting/auditing](/crosscutting/auditing) |
+| `Volo.Abp.Authorization.*` | 2 | `Volo.Abp.Authorization`, `.Abstractions` | [/crosscutting/authorization-and-permissions](/crosscutting/authorization-and-permissions) |
+| `Volo.Abp.Validation.*` | 2 | `Volo.Abp.Validation`, `.Abstractions` (plus FluentValidation adapter) | [/crosscutting/validation](/crosscutting/validation) |
+| `Volo.Abp.Localization.*` | 2 | `Volo.Abp.Localization`, `.Abstractions` | [/crosscutting/localization](/crosscutting/localization) |
+| `Volo.Abp.Json.*` | 4 | `Json`, `.Abstractions`, `.Newtonsoft`, `.SystemTextJson` | [/infrastructure/json-serialization](/infrastructure/json-serialization) |
+| `Volo.Abp.MultiTenancy.*` | 3 | `Volo.Abp.MultiTenancy`, `.Abstractions`, plus `Volo.Abp.AspNetCore.MultiTenancy` | [/multi-tenancy/overview](/multi-tenancy/overview) |
+| `Volo.Abp.Ddd.*` | 4 | `Ddd.Domain.Shared`, `Ddd.Domain`, `Ddd.Application.Contracts`, `Ddd.Application` | [/ddd/overview](/ddd/overview) |
+| `Volo.Abp.Sms.*` | 3 | `Sms`, `.Aliyun`, `.TencentCloud` | [/infrastructure/sms-and-emailing](/infrastructure/sms-and-emailing) |
+| `Volo.Abp.Ldap.*` | 2 | `Ldap`, `.Abstractions` | — |
+| `Volo.Abp.AI.*` | 2 | `AI`, `.Abstractions` (Semantic Kernel / MCP integration) | — |
+| `Volo.Abp.DistributedLocking.*` | 3 | `DistributedLocking`, `.Abstractions`, `.Dapr` | [/infrastructure/distributed-locking](/infrastructure/distributed-locking) |
+| `Volo.Abp.Autofac.*` | 2 | `Volo.Abp.Autofac` (server), `.WebAssembly` (browser) | [/core/dependency-injection](/core/dependency-injection) |
+| `Volo.Abp.TickerQ` | 1 | TickerQ scheduler integration (paired with `BackgroundJobs.TickerQ` and `BackgroundWorkers.TickerQ`) | — |
+| Singletons (one each) | ~46 | `Volo.Abp.ApiVersioning.Abstractions`, `Volo.Abp.AutoMapper`, `Volo.Abp.AzureServiceBus`, `Volo.Abp.BlazoriseUI`, `Volo.Abp.Castle.Core`, `Volo.Abp.Cli`, `Volo.Abp.Cli.Core`, `Volo.Abp.Dapper`, `Volo.Abp.Dapr`, `Volo.Abp.Data`, `Volo.Abp.Emailing`, `Volo.Abp.ExceptionHandling`, `Volo.Abp.Features`, `Volo.Abp.FluentValidation`, `Volo.Abp.Gdpr.Abstractions`, `Volo.Abp.GlobalFeatures`, `Volo.Abp.Guids`, `Volo.Abp.HangFire`, `Volo.Abp.Kafka`, `Volo.Abp.MailKit`, `Volo.Abp.Mapperly`, `Volo.Abp.Maui.Client`, `Volo.Abp.MemoryDb`, `Volo.Abp.Minify`, `Volo.Abp.MongoDB`, `Volo.Abp.MultiLingualObjects`, `Volo.Abp.ObjectExtending`, `Volo.Abp.ObjectMapping`, `Volo.Abp.Quartz`, `Volo.Abp.RabbitMQ`, `Volo.Abp.RemoteServices`, `Volo.Abp.Security`, `Volo.Abp.Serialization`, `Volo.Abp.Settings`, `Volo.Abp.Specifications`, `Volo.Abp.Swashbuckle`, `Volo.Abp.TestBase`, `Volo.Abp.Threading`, `Volo.Abp.Timing`, `Volo.Abp.UI`, `Volo.Abp.UI.Navigation`, `Volo.Abp.Uow`, `Volo.Abp.VirtualFileSystem` | various |
+
+<Tip>
+  Use a regex like `framework/src/Volo.Abp.AspNetCore.*` in your IDE to fold
+  the AspNetCore cluster in solution explorers. The same prefix-based grouping
+  is mirrored by `framework/Volo.Abp.slnx` folders.
+</Tip>
+
+### Inside a typical `Volo.Abp.*` package folder
+
+Every package directory under `framework/src/` follows the same shape. Using `framework/src/Volo.Abp.EventBus/` as an example:
+
+| File / folder | Purpose |
+|---|---|
+| `Volo.Abp.EventBus.csproj` | SDK-style csproj that imports `../../common.props` and pulls central package versions. |
+| `Volo.Abp.EventBus.abppkg` | ABP Studio package descriptor (referenced from `.abpsln` / `.abpmdl`). |
+| `Volo.Abp.EventBus.abppkg.analyze.json` | Per-package analyzer config (packed as content). |
+| `AbpEventBusModule.cs` | The single `AbpModule` subclass; the entry point for `[DependsOn]`. |
+| `Volo/Abp/EventBus/...` | Source tree using ABP's `Volo.Abp.X` namespace convention. |
+| `Localization/Resources/AbpEventBus/...` | JSON localization (if the package emits user-facing strings). |
+
+The framework convention is "one module per package, one package per assembly" — see [/core/modularity-and-modules](/core/modularity-and-modules).
+
+## `modules/` — 19 application modules
+
+`modules/` contains pre-built application modules. Each subfolder is a self-contained ABP solution with its own `.slnx`, `.abpsln`, `src/`, and `test/` trees, and depends only on packages from `framework/src/`.
+
+| Folder | Module | Notes |
+|---|---|---|
+| `modules/account/` | `Volo.Account` | Login/register UI (open-source) |
+| `modules/audit-logging/` | `Volo.AuditLogging` | Persists audit logs to EF Core / MongoDB |
+| `modules/background-jobs/` | `Volo.Abp.BackgroundJobs` (persistence) | Database-backed background job store |
+| `modules/basic-theme/` | `Volo.Abp.AspNetCore.Mvc.UI.Theme.Basic` | Default MVC theme |
+| `modules/blob-storing-database/` | `Volo.BlobStoring.Database` | Stores blobs inside the app DB |
+| `modules/blogging/` | `Volo.Blogging` | Sample blogging module |
+| `modules/client-simulation/` | `Volo.ClientSimulation` | Synthetic traffic generator |
+| `modules/cms-kit/` | `Volo.CmsKit` | Tagging, blogging, comments, ratings |
+| `modules/docs/` | `Volo.Docs` | Powers abp.io/docs |
+| `modules/feature-management/` | `Volo.Abp.FeatureManagement` | Persisted feature toggles |
+| `modules/identity/` | `Volo.Abp.Identity` | Users, roles, claims, OUs |
+| `modules/identityserver/` | `Volo.Abp.IdentityServer` | Legacy IdentityServer 4 integration |
+| `modules/openiddict/` | `Volo.Abp.OpenIddict` | Modern OpenIddict integration (default for v8+) |
+| `modules/permission-management/` | `Volo.Abp.PermissionManagement` | Persists permission grants |
+| `modules/setting-management/` | `Volo.Abp.SettingManagement` | Persists user/tenant/global settings |
+| `modules/tenant-management/` | `Volo.Abp.TenantManagement` | Tenants + Editions (paired with SaaS in the commercial side) |
+| `modules/users/` | `Volo.Abp.Users` | Shared user abstractions |
+| `modules/virtual-file-explorer/` | `Volo.Abp.VirtualFileExplorer` | Browses the virtual file system at runtime |
+| `modules/README.md` | Top-level README listing all modules. | |
+
+See [/modules/overview](/modules/overview) for how to depend on a module and the order in which they layer on top of the framework.
+
+## `templates/` — Startup templates
+
+`templates/` is a fixture set used by the CLI / ABP Studio to scaffold new solutions.
+
+| Folder | Template | Output |
+|---|---|---|
+| `templates/app/aspnet-core/` | Full DDD app — backend | MVC + Blazor Server + Blazor WASM + Angular variants |
+| `templates/app/angular/` | Full DDD app — Angular frontend | Standalone Angular workspace paired with `app/aspnet-core/` |
+| `templates/app-nolayers/aspnet-core/` | Single-layer (no DDD) app | One project, all layers collapsed |
+| `templates/module/aspnet-core/` | Reusable module template | Mirrors the shape of `modules/identity/` |
+| `templates/console/` | Console host | Minimal `IHostBuilder` + `AbpApplicationFactory` |
+| `templates/maui/` | MAUI Blazor client | Pairs with `app/aspnet-core/` HTTP API host |
+| `templates/wpf/` | WPF desktop sample | Windows-only |
+| `templates/Directory.Packages.props` | Central package management for generated solutions | mirrors the root file |
+| `templates/zip-templates.ps1` | Packs each template into a `.zip` for distribution | called by `deploy/_run_all.ps1` |
+
+The "no-layers" variant is documented at [/templates/overview](/templates/overview). Generated solutions use the same `MyCompanyName.MyProjectName.slnx` layout shown in `templates/app/aspnet-core/`.
+
+## `npm/` — JavaScript and Angular
+
+`npm/` hosts the JavaScript half of ABP.
+
+| Path | Role |
+|---|---|
+| `npm/package.json` | Top-level — only utility scripts (`replace-with-tilde.js`, `update-gulp.js`, `package-update-script.js`). |
+| `npm/lerna.json` | Lerna monorepo manifest covering `packs/` (MVC) and `ng-packs/` (Angular). |
+| `npm/packs/` | NPM packages that ship MVC/Razor static assets (e.g., `@abp/aspnetcore.mvc.ui`, `@abp/aspnetcore.mvc.ui.theme.basic`). |
+| `npm/ng-packs/` | The full Angular workspace — `@abp/ng.core`, `@abp/ng.theme.basic`, `@abp/ng.identity`, etc. Built with Nx (`ng-packs/package.json` lists Angular ~21.0.0, Nx ~22.2.0). |
+| `npm/scripts/` | Build helpers used by the publish pipeline. |
+| `npm/verdaccio-containers/` | Local Verdaccio config for end-to-end publish dry-runs. |
+| `npm/publish-mvc.ps1` | Publishes the `packs/` NPM packages. |
+| `npm/publish-ng.ps1` | Publishes the `ng-packs/` NPM packages. |
+| `npm/preview-publish.ps1` | Dry-run publish against Verdaccio. |
+| `npm/replace-with-tilde.js` | Rewrites `^` ranges to `~` before publish. |
+
+The Angular layer is covered by [/angular/overview](/angular/overview).
+
+## `studio/` and `source-code/`
+
+Both folders host the same set of 18 "SourceCode" projects but for different consumers:
+
+- `studio/source-codes/` — a snapshot consumed by **ABP Studio**'s "Get Source Code" command; users who own a commercial license can replace their NuGet references with the matching `*.SourceCode` project.
+- `source-code/SourceCodes.slnx` — the same projects opened as a normal `dotnet` solution for direct contribution / debugging.
+
+Members include `Volo.Abp.Identity.SourceCode`, `Volo.Abp.OpenIddict.SourceCode`, `Volo.Abp.PermissionManagement.SourceCode`, `Volo.CmsKit.SourceCode`, `Volo.Docs.SourceCode`, `Volo.Blogging.SourceCode`, `Volo.ClientSimulation.SourceCode` and 11 others — one per module in `modules/`.
+
+## `build/`, `deploy/`, `nupkg/` and `tools/`
+
+The PowerShell pipeline that builds the entire repo lives in three folders that share `common.ps1` snippets.
+
+| Path | Role |
+|---|---|
+| `build/common.ps1` | Declares `$solutionPaths` — the ordered list of `.slnx` directories to walk. Supports a `-f` "full" mode that adds templates, docs, source-code. |
+| `build/build-all.ps1` | Runs `dotnet build` against every solution in `$solutionPaths`. |
+| `build/build-all-release.ps1` | Same but `--configuration Release -- /maxcpucount`. |
+| `build/test-all.ps1` | Runs `dotnet test --no-build --no-restore --collect:"XPlat Code Coverage"` per solution. |
+| `deploy/1-fetch-and-build.ps1` … `8-download-release-zip.ps1` | Numbered release steps — pull, pack, push NuGet, npm publish MVC + Angular, commit version bump, create GitHub release, download zip artifacts. |
+| `deploy/_run_all.ps1` | Runs the 8 steps in order. |
+| `deploy/new-github-release-function.psm1` | Helper module called from `7-publish-github-release.ps1`. |
+| `nupkg/pack.ps1` | Packs every `.csproj` to `nupkg/0/` (the staging folder). |
+| `nupkg/push_packages.ps1` | Pushes the staging folder to nuget.org. |
+| `nupkg/push-nightly-packages-myget.ps1` | Nightly upload to MyGet (`abp-nightly` feed). |
+| `nupkg/unit_test.ps1` | Smoke test that consumes a freshly-packed nupkg locally. |
+| `tools/nuget/nuget.exe` | Vendored NuGet CLI used by the nupkg scripts on Windows agents. |
+| `tools/github-changelog-generator/` | Generates changelog markdown from milestone metadata. |
+| `tools/localization-key-synchronizer/` | Keeps `Localization/Resources/*.json` files in sync across locales. |
+| `tools/smtp-prober-email-sender.exe` | Diagnostic SMTP client used while developing `Volo.Abp.MailKit`. |
+
+The mechanics of each script are explained in detail in [/build-deploy/build-system](/build-deploy/build-system) and [/build-deploy/release-pipeline](/build-deploy/release-pipeline).
+
+## `docs/` — the documentation site
+
+`docs/` is the markdown source for the abp.io/docs website. It is not built by `dotnet`; it is rendered by the Docs module (`modules/docs/`) reading the files at runtime.
+
+| Path | Contents |
+|---|---|
+| `docs/docs-langs.json` | Available languages (English only is checked in; others are translated separately). |
+| `docs/en/docs-nav.json` | The navigation tree consumed by the Docs module. |
+| `docs/en/index.md` | Landing page. |
+| `docs/en/framework/` | Framework reference (DDD, multi-tenancy, infrastructure, fundamentals). |
+| `docs/en/modules/` | Per-module reference pages. |
+| `docs/en/tutorials/` | Book-Store, Modular CRM, Microservice tutorials. |
+| `docs/en/get-started/` | Getting-started pages. |
+| `docs/en/cli/` | ABP CLI reference — paired with [/cli/overview](/cli/overview). |
+| `docs/en/studio/` | ABP Studio reference. |
+| `docs/en/solution-templates/` | Template documentation — paired with [/templates/overview](/templates/overview). |
+| `docs/en/release-info/` | Migration guides per major version. |
+| `docs/en/samples/` | Standalone sample pointers. |
+| `docs/en/community-articles/`, `docs/en/blog-posts/` | Aggregated community / blog content. |
+| `docs/en/images/` | Diagrams and screenshots referenced from the markdown. |
+
+## `ai-rules/` — coding rules for AI assistants
+
+`ai-rules/` ships `.mdc` rule files (Cursor / Claude Code format) that capture ABP idioms.
+
+| File | Scope |
+|---|---|
+| `ai-rules/common/abp-core.mdc` | Core conventions (modules, DI, options). |
+| `ai-rules/common/application-layer.mdc` | Writing `ApplicationService` / `CrudAppService` correctly. |
+| `ai-rules/common/authorization.mdc` | Permission-management patterns. |
+| `ai-rules/common/cli-commands.mdc` | ABP CLI command reference. |
+| `ai-rules/common/ddd-patterns.mdc` | DDD building blocks. |
+| `ai-rules/common/dependency-rules.mdc` | Layered dependency rules. |
+| `ai-rules/common/development-flow.mdc` | Standard add-entity / add-page workflow. |
+| `ai-rules/common/infrastructure.mdc` | Event bus, background jobs, caching. |
+| `ai-rules/common/multi-tenancy.mdc` | Tenant context handling. |
+| `ai-rules/data/ef-core.mdc` | EF Core specifics — `IRepository<T>`, `DbContext`. |
+| `ai-rules/data/mongodb.mdc` | MongoDB-specific repository wiring. |
+| `ai-rules/template-specific/app-nolayers.mdc`, `microservice.mdc`, `module.mdc` | Template-specific guidance. |
+| `ai-rules/testing/patterns.mdc` | xUnit + `AbpIntegratedTest<T>` patterns. |
+| `ai-rules/ui/angular.mdc`, `blazor.mdc`, `mvc.mdc` | Per-UI guidance. |
+
+These files are not consumed by the framework itself — they are for human/AI developers working on ABP code.
+
+## `apiSpec/`, `test/`, `nupkg/`, `lowcode/`, `abp_io/`
+
+These are smaller, single-purpose folders.
+
+- `apiSpec/Microsoft_AspNetCore_Routing_AbpEndpointRouterOptions.md` — DocFX `uid:`-keyed markdown that supplements XML docs for types we extend (currently just `AbpEndpointRouterOptions`).
+- `test/AbpPerfTest/` — micro-benchmarks for the modularity boot path.
+- `test/DistEvents/` — distributed event-bus smoke harness across RabbitMQ/Kafka.
+- `nupkg/` — local NuGet packaging scripts (`pack.ps1`, `push_packages.ps1`, `push-nightly-packages-myget.ps1`, `unit_test.ps1`). The empty `nupkg/0/` folder is the pack output target.
+- `lowcode/schema/model.schema.json` plus `lowcode/schema/definitions/` — JSON Schema for ABP Suite's low-code entity / page models.
+- `abp_io/AbpIoLocalization.slnx` and `abp_io/AbpIoLocalization/` — translation resources used by the abp.io website itself (not by user apps).
+
+## Configuration files at the repo root
+
+The repo root contains six MSBuild / SDK control files that propagate to every project.
+
+| File | Effect |
+|---|---|
+| `Directory.Build.props` | Auto-imported by MSBuild. Detects test projects by name (`*.Tests`, `*.TestBase` under a `test` path) and conditionally adds `coverlet.collector`. |
+| `Directory.Packages.props` | Enables Central Package Management (`<ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>`) and lists every `PackageVersion`. See [/overview/tech-stack-and-dependencies](/overview/tech-stack-and-dependencies). |
+| `common.props` | Imported manually by every `Volo.Abp.*` `.csproj`. Sets `<LangVersion>latest</LangVersion>`, `<Version>10.2.0-rc.3</Version>`, `<LeptonXVersion>5.2.0-rc.3</LeptonXVersion>`, license `LGPL-3.0-only`, NuGet metadata, source-link, and `*.abppkg(.analyze.json)` content packing. |
+| `common.test.props` | Imported by test projects. Same lang version + suppresses assembly metadata attributes. |
+| `configureawait.props` | Imports the `ConfigureAwait.Fody` weaver in Release builds — strips `.ConfigureAwait(false)` boilerplate from async methods. |
+| `global.json` | Pins `sdk.version` to `10.0.100` with `rollForward: latestFeature`. |
+| `NuGet.Config` | Single feed: `nuget.org`. Nightly builds rely on a separate MyGet feed configured per-CI. |
+| `latest-versions.json` | Release manifest read by abp.io to render version selectors. |
+| `codecov.yml` | Codecov integration thresholds. |
+| `common.DotSettings` | Team-shared ReSharper code style. |
+| `delete-bin-obj.ps1` | Recursively deletes `bin/` and `obj/` — useful before a clean rebuild. |
+
+<Warning>
+  `Directory.Build.props` and `Directory.Packages.props` are picked up
+  automatically by every nested project. Editing them touches the entire
+  monorepo — use with care.
+</Warning>
+
+## Cross-reference matrix
+
+The wiki organizes the same code along different axes. Use this matrix to jump between layouts.
+
+| If you opened... | ...read this wiki page |
+|---|---|
+| `framework/src/Volo.Abp.Core/` | [/core/overview](/core/overview), [/core/abp-application-and-bootstrap](/core/abp-application-and-bootstrap), [/core/modularity-and-modules](/core/modularity-and-modules) |
+| `framework/src/Volo.Abp.Ddd.Domain/` | [/ddd/domain-entities-and-aggregates](/ddd/domain-entities-and-aggregates) |
+| `framework/src/Volo.Abp.Data/` | [/data/overview](/data/overview) |
+| `framework/src/Volo.Abp.EntityFrameworkCore*/` | [/data/entity-framework-core](/data/entity-framework-core) |
+| `framework/src/Volo.Abp.MongoDB/` | [/data/mongodb](/data/mongodb) |
+| `framework/src/Volo.Abp.MultiTenancy*/` | [/multi-tenancy/overview](/multi-tenancy/overview) |
+| `framework/src/Volo.Abp.EventBus*/` | [/infrastructure/event-bus](/infrastructure/event-bus) |
+| `framework/src/Volo.Abp.BlobStoring*/` | [/infrastructure/blob-storing](/infrastructure/blob-storing) |
+| `framework/src/Volo.Abp.BackgroundJobs*/`, `*/BackgroundWorkers*/` | [/infrastructure/background-jobs-and-workers](/infrastructure/background-jobs-and-workers) |
+| `framework/src/Volo.Abp.Cli*/` | [/cli/overview](/cli/overview) |
+| `templates/` | [/templates/overview](/templates/overview) |
+| `modules/` | [/modules/overview](/modules/overview) |
+| `build/`, `deploy/`, `nupkg/` | [/build-deploy/build-system](/build-deploy/build-system), [/build-deploy/release-pipeline](/build-deploy/release-pipeline) |
+| `Directory.Packages.props` | [/overview/tech-stack-and-dependencies](/overview/tech-stack-and-dependencies) |
+| `framework/Volo.Abp.slnx`, `*.abpsln`, `*.abpmdl` | [/overview/solution-and-build](/overview/solution-and-build) |
+
+## Where to start reading code
+
+<Steps>
+  <Step title="The boot path">
+    Open `framework/src/Volo.Abp.Core/Volo/Abp/AbpApplicationBase.cs` —
+    the constructor calls `LoadModules`, `ConfigureServices`, and is invoked
+    by `AbpApplicationFactory.CreateAsync<T>(...)`. See
+    [/core/abp-application-and-bootstrap](/core/abp-application-and-bootstrap).
+  </Step>
+  <Step title="The module graph">
+    Open `framework/src/Volo.Abp.Core/Volo/Abp/Modularity/ModuleLoader.cs` and
+    `AbpModuleHelper.cs` — `FillModules` + `SortByDependency` are the two
+    methods that resolve `[DependsOn]` at startup. Continue with
+    [/overview/modularity-model](/overview/modularity-model).
+  </Step>
+  <Step title="A representative integration package">
+    Open `framework/src/Volo.Abp.EntityFrameworkCore/` — a clean example of
+    options classes, an `AbpModule`, repositories, and a `DbContext` base.
+    Continue with [/data/entity-framework-core](/data/entity-framework-core).
+  </Step>
+  <Step title="A representative application module">
+    Open `modules/identity/src/Volo.Abp.Identity.Domain/` — shows how a
+    feature is split across `Domain.Shared`, `Domain`, `Application.Contracts`,
+    `Application`, `EntityFrameworkCore`, `MongoDB`, `HttpApi`,
+    `HttpApi.Client`, `Web` and `Blazor` packages.
+  </Step>
+  <Step title="A startup template">
+    Open `templates/app/aspnet-core/MyCompanyName.MyProjectName.slnx` to see
+    how a generated DDD solution stitches together a host + module references.
+    Continue with [/templates/overview](/templates/overview).
+  </Step>
+</Steps>

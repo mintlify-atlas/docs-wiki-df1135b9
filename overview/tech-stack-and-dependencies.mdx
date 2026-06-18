@@ -1,0 +1,487 @@
+---
+title: "Tech Stack: NuGet, npm and Every Pinned Dependency"
+sidebarTitle: "Tech Stack"
+description: "Every PackageVersion in Directory.Packages.props mapped to ABP packages, plus the npm/ng-packs side — EFCore, Autofac, OpenIddict, Serilog, OpenTelemetry, Angular."
+---
+
+The ABP Framework is, at heart, an opinionated composition of well-known .NET libraries — and a parallel composition of npm packages on the Angular / MVC side. This page is the inventory: every `PackageVersion` declared in `Directory.Packages.props` matched to the `framework/src/Volo.Abp.*` packages that pull it in, plus the npm packages that drive `npm/ng-packs/` and `npm/packs/`. Use it to answer "what version of Autofac is ABP on?", "which package gives me MongoDB integration?", and "what versions of Angular ship with v10?".
+
+For the props file mechanics that make central package management work, see [/overview/solution-and-build](/overview/solution-and-build); for the runtime that consumes these libraries, see [/overview/modularity-model](/overview/modularity-model). For .NET versions, `global.json` pins SDK `10.0.100` with `rollForward: latestFeature` — every package below targets `net10.0` unless otherwise noted.
+
+## Where the numbers come from
+
+Every version in this page is read directly from `Directory.Packages.props` at the repo root. That file enables Central Package Management with:
+
+```xml
+<PropertyGroup>
+  <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  <CentralPackageFloatingVersionsEnabled>true</CentralPackageFloatingVersionsEnabled>
+</PropertyGroup>
+```
+
+After that, ~180 `<PackageVersion Include="..." Version="..." />` entries fix the version of every transitive `PackageReference` in the monorepo. Individual `.csproj` files never carry a `Version=""` attribute.
+
+<Note>
+  The "Used by" column lists the ABP packages whose csproj declares a
+  `<PackageReference>` for the row's library. If you need an exhaustive
+  consumer list, `grep -rn "PackageReference.*Include=\"AutoMapper\"" framework/ modules/`
+  inside the repo reveals every csproj.
+</Note>
+
+## Microsoft.* — the platform
+
+The Microsoft-published packages cluster around ASP.NET Core, Entity Framework Core and `Microsoft.Extensions.*`. They all sit on `10.0.2` in the v10 line.
+
+### ASP.NET Core 10.0.2
+
+| Package | Version | Used by `framework/src/...` |
+|---|---|---|
+| `Microsoft.AspNetCore.Authentication.JwtBearer` | `10.0.2` | `Volo.Abp.AspNetCore.Authentication.JwtBearer` |
+| `Microsoft.AspNetCore.Authentication.OpenIdConnect` | `10.0.2` | `Volo.Abp.AspNetCore.Authentication.OpenIdConnect` |
+| `Microsoft.AspNetCore.Authorization` | `10.0.2` | `Volo.Abp.Authorization`, `Volo.Abp.AspNetCore` |
+| `Microsoft.AspNetCore.Components` | `10.0.2` | `Volo.Abp.AspNetCore.Components` |
+| `Microsoft.AspNetCore.Components.Authorization` | `10.0.2` | `Volo.Abp.AspNetCore.Components.Web`, `Volo.Abp.AspNetCore.Components.WebAssembly` |
+| `Microsoft.AspNetCore.Components.Web` | `10.0.2` | `Volo.Abp.AspNetCore.Components.Web` |
+| `Microsoft.AspNetCore.Components.WebAssembly` | `10.0.2` | `Volo.Abp.AspNetCore.Components.WebAssembly` |
+| `Microsoft.AspNetCore.Components.WebAssembly.Server` | `10.0.2` | `Volo.Abp.AspNetCore.Components.WebAssembly` |
+| `Microsoft.AspNetCore.Components.WebAssembly.Authentication` | `10.0.2` | `Volo.Abp.AspNetCore.Components.WebAssembly` |
+| `Microsoft.AspNetCore.Components.WebAssembly.DevServer` | `10.0.2` | WASM template host |
+| `Microsoft.AspNetCore.Components.WebView.Maui` | `10.0.20` | `Volo.Abp.AspNetCore.Components.MauiBlazor` |
+| `Microsoft.Maui.Controls` | `10.0.20` | `Volo.Abp.Maui.Client` |
+| `Microsoft.AspNetCore.DataProtection.StackExchangeRedis` | `10.0.2` | `Volo.Abp.Caching.StackExchangeRedis` companion |
+| `Microsoft.AspNetCore.Mvc.NewtonsoftJson` | `10.0.2` | `Volo.Abp.AspNetCore.Mvc.NewtonsoftJson` |
+| `Microsoft.AspNetCore.Mvc.Razor.RuntimeCompilation` | `10.0.2` | `Volo.Abp.AspNetCore.Mvc.UI` |
+| `Microsoft.AspNetCore.Mvc.Testing` | `10.0.2` | `Volo.Abp.AspNetCore.TestBase` |
+| `Microsoft.AspNetCore.Razor.Language` | `6.0.36` | `Volo.Abp.TextTemplating.Razor` (pinned older for compat with Razor parser) |
+| `Microsoft.AspNetCore.TestHost` | `10.0.2` | `Volo.Abp.AspNetCore.TestBase` |
+| `Microsoft.AspNetCore.WebUtilities` | `10.0.2` | `Volo.Abp.AspNetCore` |
+
+The MAUI Blazor packages are on `10.0.20` because the MAUI release train ships slightly ahead of ASP.NET Core.
+
+### EF Core 10.0.2
+
+| Package | Version | Used by |
+|---|---|---|
+| `Microsoft.EntityFrameworkCore` | `10.0.2` | `Volo.Abp.EntityFrameworkCore` |
+| `Microsoft.EntityFrameworkCore.Design` | `10.0.2` | `Volo.Abp.EntityFrameworkCore` (design-time CLI integration) |
+| `Microsoft.EntityFrameworkCore.InMemory` | `10.0.2` | `Volo.Abp.EntityFrameworkCore.InMemory` test fixtures |
+| `Microsoft.EntityFrameworkCore.Proxies` | `10.0.2` | `Volo.Abp.EntityFrameworkCore` (lazy loading) |
+| `Microsoft.EntityFrameworkCore.Relational` | `10.0.2` | All relational providers |
+| `Microsoft.EntityFrameworkCore.Sqlite` | `10.0.2` | `Volo.Abp.EntityFrameworkCore.Sqlite` |
+| `Microsoft.EntityFrameworkCore.SqlServer` | `10.0.2` | `Volo.Abp.EntityFrameworkCore.SqlServer` |
+| `Microsoft.EntityFrameworkCore.Tools` | `10.0.2` | Design-time tooling reference |
+| `Npgsql.EntityFrameworkCore.PostgreSQL` | `10.0.0` | `Volo.Abp.EntityFrameworkCore.PostgreSql` |
+| `Pomelo.EntityFrameworkCore.MySql` | `9.0.0` | `Volo.Abp.EntityFrameworkCore.MySQL.Pomelo` |
+| `MySql.EntityFrameworkCore` | `10.0.1` | `Volo.Abp.EntityFrameworkCore.MySQL` |
+| `Oracle.EntityFrameworkCore` | `10.23.26000` | `Volo.Abp.EntityFrameworkCore.Oracle` |
+| `Devart.Data.Oracle.EFCore` | `11.0.0.9` | `Volo.Abp.EntityFrameworkCore.Oracle.Devart` |
+| `Microsoft.Data.Sqlite` | `10.0.2` | sqlite test fixtures |
+| `Microsoft.Data.SqlClient` | `6.1.1` | sql-server provider |
+
+See [/data/entity-framework-core](/data/entity-framework-core) for how ABP wraps these into `IRepository<T>`.
+
+### Microsoft.Extensions.* 10.0.2
+
+| Package | Version | Used by |
+|---|---|---|
+| `Microsoft.Extensions.Caching.Hybrid` | `9.9.0` | `Volo.Abp.Caching` (hybrid cache layer) |
+| `Microsoft.Extensions.Caching.Memory` | `10.0.2` | `Volo.Abp.Caching` |
+| `Microsoft.Extensions.Caching.StackExchangeRedis` | `10.0.2` | `Volo.Abp.Caching.StackExchangeRedis` |
+| `Microsoft.Extensions.Configuration.Binder` | `10.0.2` | `Volo.Abp.Core` |
+| `Microsoft.Extensions.Configuration.CommandLine` | `10.0.2` | `Volo.Abp.Cli` |
+| `Microsoft.Extensions.Configuration.EnvironmentVariables` | `10.0.2` | `Volo.Abp.Core` |
+| `Microsoft.Extensions.Configuration.UserSecrets` | `10.0.2` | `Volo.Abp.Core` |
+| `Microsoft.Extensions.DependencyInjection` | `10.0.2` | `Volo.Abp.Core` |
+| `Microsoft.Extensions.DependencyInjection.Abstractions` | `10.0.2` | every package |
+| `Microsoft.Extensions.FileProviders.Composite` | `10.0.2` | `Volo.Abp.VirtualFileSystem` |
+| `Microsoft.Extensions.FileProviders.Embedded` | `10.0.2` | `Volo.Abp.VirtualFileSystem` |
+| `Microsoft.Extensions.FileProviders.Physical` | `10.0.2` | `Volo.Abp.VirtualFileSystem` |
+| `Microsoft.Extensions.FileSystemGlobbing` | `10.0.2` | `Volo.Abp.VirtualFileSystem` |
+| `Microsoft.Extensions.Hosting` | `10.0.2` | host integration |
+| `Microsoft.Extensions.Hosting.Abstractions` | `10.0.2` | every package needing `IHostedService` |
+| `Microsoft.Extensions.Http` | `10.0.2` | `Volo.Abp.Http.Client` |
+| `Microsoft.Extensions.Identity.Core` | `10.0.2` | `Volo.Abp.Identity.Domain` (modules) |
+| `Microsoft.Extensions.Localization` | `10.0.2` | `Volo.Abp.Localization` |
+| `Microsoft.Extensions.Logging` / `.Abstractions` / `.Console` | `10.0.2` | `Volo.Abp.Core` |
+| `Microsoft.Extensions.Options` / `.ConfigurationExtensions` | `10.0.2` | every package using `Configure<TOptions>` |
+
+### Identity & tokens
+
+| Package | Version | Used by |
+|---|---|---|
+| `Microsoft.IdentityModel.Protocols.OpenIdConnect` | `8.14.0` | `Volo.Abp.AspNetCore.Authentication.OpenIdConnect` |
+| `Microsoft.IdentityModel.Tokens` | `8.14.0` | `Volo.Abp.AspNetCore.Authentication.JwtBearer` |
+| `Microsoft.IdentityModel.JsonWebTokens` | `8.14.0` | `Volo.Abp.AspNetCore.Authentication.JwtBearer` |
+| `System.IdentityModel.Tokens.Jwt` | `8.14.0` | `Volo.Abp.IdentityModel` |
+| `Duende.IdentityModel` | `7.1.0` | `Volo.Abp.IdentityModel` (client) |
+
+### Misc Microsoft
+
+| Package | Version | Used by |
+|---|---|---|
+| `Microsoft.Bcl.AsyncInterfaces` | `10.0.2` | shared abstractions |
+| `Microsoft.CodeAnalysis.CSharp` | `4.5.0` | `Volo.Abp.AspNetCore.Mvc` (Razor compilation), `Volo.Abp.TextTemplating.Razor` |
+| `Microsoft.CSharp` | `4.7.0` | dynamic helpers |
+| `Microsoft.SemanticKernel` / `.Abstractions` | `1.71.0` | `Volo.Abp.AI` (LLM integration) |
+| `Microsoft.NET.Test.Sdk` | `17.14.1` | every test project |
+| `Microsoft.VisualStudio.Web.CodeGeneration.Design` | `9.0.0` | template scaffolding |
+| `Microsoft.SourceLink.GitHub` | `8.0.0` | imported via `common.props` |
+| `Microsoft.SemanticKernel` | `1.71.0` | `Volo.Abp.AI`, `Volo.Abp.AI.Abstractions` |
+
+## Dependency injection & dynamic proxy
+
+| Package | Version | Used by |
+|---|---|---|
+| `Autofac` | `8.4.0` | `Volo.Abp.Autofac` (the production DI container) |
+| `Autofac.Extensions.DependencyInjection` | `10.0.0` | `Volo.Abp.Autofac` |
+| `Autofac.Extras.DynamicProxy` | `7.1.0` | `Volo.Abp.Autofac` (interceptor binding) |
+| `Castle.Core` | `5.2.1` | `Volo.Abp.Castle.Core` (DynamicProxy backbone) |
+| `Castle.Core.AsyncInterceptor` | `2.1.0` | `Volo.Abp.Castle.Core` (async interception support) |
+
+`Volo.Abp.Autofac` is opt-in: a console host or web app must depend on it explicitly to swap the default `Microsoft.Extensions.DependencyInjection` container. See [/core/dependency-injection](/core/dependency-injection) and [/core/dynamic-proxy-and-interceptors](/core/dynamic-proxy-and-interceptors).
+
+## Mapping, validation, dynamic LINQ
+
+| Package | Version | Used by |
+|---|---|---|
+| `AutoMapper` | `14.0.0` | `Volo.Abp.AutoMapper` |
+| `Riok.Mapperly` | `4.3.1` | `Volo.Abp.Mapperly` (source-generated mapping) |
+| `FluentValidation` | `12.0.0` | `Volo.Abp.FluentValidation` |
+| `System.Linq.Dynamic.Core` | `1.6.7` | `Volo.Abp.Data` (dynamic `Where`/`OrderBy`) |
+| `System.Linq.Queryable` | `4.3.0` | abstractions |
+| `System.Collections.Immutable` | `10.0.2` | shared utilities |
+| `System.ComponentModel.Annotations` | `5.0.0` | DTO attributes |
+| `JetBrains.Annotations` | `2025.2.2` | `Volo.Abp.Core` (nullability hints) |
+| `Nullable` | `1.3.1` | downlevel nullable polyfill |
+
+## Persistence beyond EF Core
+
+| Package | Version | Used by |
+|---|---|---|
+| `MongoDB.Driver` | `3.7.0` | `Volo.Abp.MongoDB` |
+| `Dapper` | `2.1.66` | `Volo.Abp.Dapper` |
+| `Dapr.AspNetCore` | `1.16.0` | `Volo.Abp.Dapr`, `Volo.Abp.AspNetCore.Mvc.Dapr` |
+| `Dapr.Client` | `1.16.0` | `Volo.Abp.Dapr` |
+| `NEST` | `7.17.5` | optional Elasticsearch integration |
+| `DistributedLock.Core` | `1.0.8` | `Volo.Abp.DistributedLocking` |
+| `DistributedLock.Redis` | `1.1.0` | `Volo.Abp.DistributedLocking` (Redis backend) |
+| `StackExchange.Redis` | `2.9.17` | `Volo.Abp.Caching.StackExchangeRedis`, distributed locks |
+| `MongoSandbox.Core` | `2.0.0` | `Volo.Abp.MongoDB` test fixtures |
+| `MongoSandbox8.runtime.linux-x64` | `2.0.0` | test runtime |
+| `MongoSandbox8.runtime.osx-arm64` | `2.0.0` | test runtime |
+| `MongoSandbox8.runtime.win-x64` | `2.0.0` | test runtime |
+
+See [/data/mongodb](/data/mongodb) for ABP's MongoDB repository surface.
+
+## Background jobs and scheduling
+
+| Package | Version | Used by |
+|---|---|---|
+| `Hangfire.AspNetCore` | `1.8.21` | `Volo.Abp.BackgroundJobs.HangFire`, `Volo.Abp.HangFire` |
+| `Hangfire.SqlServer` | `1.8.21` | `Volo.Abp.BackgroundJobs.HangFire` |
+| `Quartz` | `3.15.0` | `Volo.Abp.BackgroundJobs.Quartz`, `Volo.Abp.Quartz` |
+| `Quartz.Extensions.DependencyInjection` | `3.15.0` | `Volo.Abp.Quartz` |
+| `Quartz.Plugins.TimeZoneConverter` | `3.15.0` | `Volo.Abp.Quartz` |
+| `Quartz.Serialization.Json` | `3.15.0` | `Volo.Abp.Quartz` |
+| `TickerQ` | `10.1.1` | `Volo.Abp.TickerQ` |
+| `TickerQ.Dashboard` | `10.1.1` | `Volo.Abp.TickerQ` |
+| `TickerQ.Utilities` | `10.1.1` | `Volo.Abp.TickerQ` |
+| `TickerQ.EntityFrameworkCore` | `10.1.1` | `Volo.Abp.BackgroundJobs.TickerQ` |
+
+Three independently-versioned schedulers ship side-by-side. Pick one per host — see [/infrastructure/background-jobs-and-workers](/infrastructure/background-jobs-and-workers).
+
+## Messaging — event bus
+
+| Package | Version | Used by |
+|---|---|---|
+| `RabbitMQ.Client` | `7.1.2` | `Volo.Abp.RabbitMQ`, `Volo.Abp.EventBus.RabbitMQ`, `Volo.Abp.BackgroundJobs.RabbitMQ` |
+| `Confluent.Kafka` | `2.11.1` | `Volo.Abp.Kafka`, `Volo.Abp.EventBus.Kafka` |
+| `Azure.Messaging.ServiceBus` | `7.20.1` | `Volo.Abp.AzureServiceBus`, `Volo.Abp.EventBus.Azure` |
+| `Rebus` | `8.8.0` | `Volo.Abp.EventBus.Rebus` |
+| `Rebus.ServiceProvider` | `10.5.0` | `Volo.Abp.EventBus.Rebus` |
+
+See [/infrastructure/event-bus](/infrastructure/event-bus).
+
+## Blob storage providers
+
+| Package | Version | Used by |
+|---|---|---|
+| `Azure.Storage.Blobs` | `12.25.0` | `Volo.Abp.BlobStoring.Azure` |
+| `AWSSDK.S3` | `4.0.7.2` | `Volo.Abp.BlobStoring.Aws` |
+| `AWSSDK.SecurityToken` | `4.0.2.2` | `Volo.Abp.BlobStoring.Aws` |
+| `Aliyun.OSS.SDK.NetCore` | `2.14.1` | `Volo.Abp.BlobStoring.Aliyun` |
+| `aliyun-net-sdk-sts` | `3.1.3` | `Volo.Abp.BlobStoring.Aliyun` |
+| `Google.Cloud.Storage.V1` | `4.13.0` | `Volo.Abp.BlobStoring.Google` |
+| `Minio` | `6.0.5` | `Volo.Abp.BlobStoring.Minio` |
+| `BunnyCDN.Net.Storage` | `1.0.4` | `Volo.Abp.BlobStoring.Bunny` |
+| `Azure.Identity` | `1.14.2` | `Volo.Abp.BlobStoring.Azure`, Key Vault helpers |
+
+See [/infrastructure/blob-storing](/infrastructure/blob-storing) for the unified `IBlobContainer<T>` surface.
+
+## Email & SMS
+
+| Package | Version | Used by |
+|---|---|---|
+| `MailKit` | `4.13.0` | `Volo.Abp.MailKit` |
+| `AlibabaCloud.SDK.Dysmsapi20170525` | `4.0.0` | `Volo.Abp.Sms.Aliyun` |
+| `TencentCloudSDK.Sms` | `3.0.1273` | `Volo.Abp.Sms.TencentCloud` |
+| `DeepL.net` | `1.15.0` | localization auto-translation in `tools/localization-key-synchronizer/` |
+
+## Identity & OpenID Connect
+
+| Package | Version | Used by |
+|---|---|---|
+| `OpenIddict.Abstractions` | `7.2.0` | `modules/openiddict/` |
+| `OpenIddict.Core` | `7.2.0` | `modules/openiddict/` |
+| `OpenIddict.Server.AspNetCore` | `7.2.0` | `modules/openiddict/` (token endpoint) |
+| `OpenIddict.Validation.AspNetCore` | `7.2.0` | `Volo.Abp.OpenIddict.Validation` |
+| `OpenIddict.Validation.ServerIntegration` | `7.2.0` | `Volo.Abp.OpenIddict.Validation` |
+| `IdentityServer4` | `4.1.2` | `modules/identityserver/` (legacy; kept for migration) |
+| `IdentityServer4.AspNetIdentity` | `4.1.2` | `modules/identityserver/` |
+| `LdapForNet` | `2.7.15` | `Volo.Abp.Ldap` |
+
+OpenIddict is the **default** auth server from v8 onward; IdentityServer 4 stays pinned at `4.1.2` for customers migrating from v7 — see [/modules/overview](/modules/overview) for module pairing.
+
+## JSON, serialization, text
+
+| Package | Version | Used by |
+|---|---|---|
+| `Newtonsoft.Json` | `13.0.4` | `Volo.Abp.Json.Newtonsoft`, `Volo.Abp.AspNetCore.Mvc.NewtonsoftJson` |
+| `System.Text.Json` | `10.0.2` | `Volo.Abp.Json.SystemTextJson` (default serializer) |
+| `System.Text.Encoding.CodePages` | `10.0.2` | text encoding helpers |
+| `System.Text.Encodings.Web` | `10.0.2` | shared |
+| `Markdig.Signed` | `0.42.0` | `Volo.CmsKit` markdown rendering |
+| `CommonMark.NET` | `0.15.1` | `Volo.Blogging` |
+| `Scriban` | `6.6.0` | `Volo.Abp.TextTemplating.Scriban` |
+| `HtmlSanitizer` | `9.0.886` | `Volo.CmsKit` |
+| `NUglify` | `1.21.17` | `Volo.Abp.Minify` |
+| `Slugify.Core` | `5.1.1` | `Volo.Blogging`, `Volo.CmsKit` |
+| `Unidecode.NET` | `2.1.0` | slug helpers |
+
+## HTTP, resilience, telemetry
+
+| Package | Version | Used by |
+|---|---|---|
+| `Polly` | `8.6.3` | `Volo.Abp.Http.Client` |
+| `Polly.Extensions.Http` | `3.0.0` | `Volo.Abp.Http.Client` |
+| `Asp.Versioning.Mvc` | `8.1.0` | `Volo.Abp.AspNetCore.Mvc.Versioning` (test target) |
+| `Asp.Versioning.Mvc.ApiExplorer` | `8.1.0` | `Volo.Abp.AspNetCore.Mvc.Versioning` |
+| `Swashbuckle.AspNetCore` | `10.0.1` | `Volo.Abp.Swashbuckle` |
+| `MyCSharp.HttpUserAgentParser` | `3.0.28` | `Volo.Abp.AspNetCore` (UA detection) |
+| `Nito.AsyncEx.Context` | `5.1.2` | `Volo.Abp.Threading` |
+
+<Note>
+  ABP does not centralize an OpenTelemetry version in `Directory.Packages.props`
+  — telemetry is wired by individual hosts as needed. The framework exposes
+  activity sources from `Volo.Abp.Internal.Telemetry` (see
+  `framework/src/Volo.Abp.Core/Volo/Abp/AbpApplicationBase.cs`) but lets the
+  app choose its exporter.
+</Note>
+
+## Logging
+
+| Package | Version | Used by |
+|---|---|---|
+| `Serilog` | `4.3.0` | `Volo.Abp.AspNetCore.Serilog` |
+| `Serilog.AspNetCore` | `9.0.0` | `Volo.Abp.AspNetCore.Serilog` |
+| `Serilog.Extensions.Hosting` | `9.0.0` | template hosts |
+| `Serilog.Extensions.Logging` | `9.0.2` | template hosts |
+| `Serilog.Sinks.Async` | `2.1.0` | `Volo.Abp.AspNetCore.Serilog` |
+| `Serilog.Sinks.Console` | `6.0.0` | hosts |
+| `Serilog.Sinks.File` | `7.0.0` | hosts |
+
+ABP uses `Microsoft.Extensions.Logging` as the abstraction; Serilog is a recommended sink chain set up in every template. See [/core/logging-and-diagnostics](/core/logging-and-diagnostics).
+
+## Imaging
+
+| Package | Version | Used by |
+|---|---|---|
+| `SixLabors.ImageSharp` | `3.1.11` | `Volo.Abp.Imaging.ImageSharp` |
+| `SixLabors.ImageSharp.Drawing` | `2.1.7` | `Volo.Abp.Imaging.ImageSharp` |
+| `Magick.NET-Q16-AnyCPU` | `14.9.1` | `Volo.Abp.Imaging.MagickNet` |
+| `SkiaSharp` | `3.119.0` | `Volo.Abp.Imaging.SkiaSharp` |
+| `SkiaSharp.NativeAssets.Linux` | `3.119.0` | `Volo.Abp.Imaging.SkiaSharp` |
+| `SkiaSharp.NativeAssets.macOS` | `3.119.0` | `Volo.Abp.Imaging.SkiaSharp` |
+
+Three independently-versioned image processors — pick one per host.
+
+## PDF & files
+
+| Package | Version | Used by |
+|---|---|---|
+| `itext7` | `9.3.0` | PDF generation in modules |
+| `itext7.pdfhtml` | `6.2.1` | HTML→PDF |
+| `itext.bouncy-castle-adapter` | `9.3.0` | required signing adapter |
+| `SharpZipLib` | `1.4.2` | archive helpers |
+
+## CLI & UI helpers
+
+| Package | Version | Used by |
+|---|---|---|
+| `Spectre.Console` | `0.51.1` | `Volo.Abp.Cli` |
+| `Octokit` | `14.0.0` | `Volo.Abp.Cli` (GitHub integration) |
+| `NuGet.Versioning` | `6.14.0` | `Volo.Abp.Cli` (version comparison) |
+| `LibGit2Sharp` | `0.31.0` | `Volo.Abp.Cli` (Studio source-code checkouts) |
+| `ModelContextProtocol` | `0.5.0-preview.1` | `Volo.Abp.AI` (MCP host) |
+| `TimeZoneConverter` | `7.2.0` | `Volo.Abp.Timing` |
+
+## Blazorise
+
+| Package | Version | Used by |
+|---|---|---|
+| `Blazorise` | `2.0.0` | `Volo.Abp.BlazoriseUI` |
+| `Blazorise.Components` | `2.0.0` | `Volo.Abp.BlazoriseUI` |
+| `Blazorise.DataGrid` | `2.0.0` | `Volo.Abp.BlazoriseUI` |
+| `Blazorise.Snackbar` | `2.0.0` | `Volo.Abp.BlazoriseUI` |
+
+See [/blazor/overview](/blazor/overview).
+
+## Testing stack
+
+| Package | Version | Used by |
+|---|---|---|
+| `xunit` | `2.9.3` | every `*.Tests` project |
+| `xunit.extensibility.execution` | `2.9.3` | xunit fixtures |
+| `xunit.runner.visualstudio` | `3.1.4` | VS test discovery |
+| `Shouldly` | `4.3.0` | assertions |
+| `NSubstitute` | `5.3.0` | mocking |
+| `coverlet.collector` | `6.0.4` | injected by `Directory.Build.props` |
+
+The test pattern (`AbpIntegratedTest<TStartupModule>`) is documented at [/core/abp-application-and-bootstrap](/core/abp-application-and-bootstrap); package conventions in [/overview/solution-and-build](/overview/solution-and-build).
+
+## Build weavers and analyzers
+
+| Package | Version | Used by |
+|---|---|---|
+| `ConfigureAwait.Fody` | `3.3.2` | imported by `configureawait.props` (Release only) |
+| `Fody` | `6.9.3` | weaver host for ConfigureAwait.Fody |
+| `Nullable` | `1.3.1` | downlevel nullable annotations |
+| `JetBrains.Annotations` | `2025.2.2` | hints consumed by ReSharper/Rider |
+
+## System.* utilities
+
+| Package | Version | Used by |
+|---|---|---|
+| `System.Security.Cryptography.Xml` | `10.0.2` | SAML, data-protection helpers |
+| `System.Security.Permissions` | `10.0.2` | code-access compatibility shims |
+| `System.Security.Principal.Windows` | `5.0.0` | Windows-only modules |
+| `System.Threading.Tasks.Extensions` | `4.6.3` | `Volo.Abp.Threading` |
+| `System.Runtime.Loader` | `4.3.0` | `Volo.Abp.Modularity.PlugIns` |
+| `System.Management` | `10.0.2` | hardware fingerprinting (Studio) |
+
+## The npm side — `npm/`
+
+ABP's JavaScript artifacts are managed in two Lerna workspaces under `npm/`. The top-level `npm/package.json` only carries utility scripts; the real package graphs live in `npm/packs/` (MVC) and `npm/ng-packs/` (Angular).
+
+### `npm/package.json` — utilities only
+
+```json
+{
+  "version": "2.3.0",
+  "scripts": {
+    "lerna": "lerna",
+    "ncu": "ncu",
+    "update-gulp": "node update-gulp.js",
+    "replace-with-tilde": "node replace-with-tilde.js",
+    "update": "node package-update-script.js"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^8.0.1",
+    "glob": "^7.1.5",
+    "lerna": "^3.18.4",
+    "npm-check-updates": "^11.3.0"
+  },
+  "dependencies": {
+    "commander": "^6.0.0",
+    "execa": "^3.4.0",
+    "fast-glob": "^3.2.7",
+    "fs-extra": "^8.1.0",
+    "semver": "^7.3.5"
+  }
+}
+```
+
+These are the dev-time helpers that drive `replace-with-tilde.js`, `update-gulp.js`, and `package-update-script.js` — used by `npm/publish-mvc.ps1` and `npm/publish-ng.ps1` (see [/build-deploy/release-pipeline](/build-deploy/release-pipeline)).
+
+### `npm/ng-packs/package.json` — the Angular workspace
+
+`npm/ng-packs/` is an Nx workspace producing `@abp/ng.core`, `@abp/ng.theme.basic`, `@abp/ng.identity`, `@abp/ng.tenant-management` and ~30 other Angular libraries. Its key versions:
+
+| Dependency | Version | Role |
+|---|---|---|
+| `@angular/core`, `common`, `forms`, `router`, `platform-browser`, `compiler` | `~21.0.0` | Angular framework |
+| `@angular-devkit/build-angular`, `core`, `schematics` | `~21.0.0` | Angular CLI tooling |
+| `@angular/cli` | `~21.0.0` | CLI |
+| `@angular/aria` | `~21.1.0` | A11y primitives |
+| `@angular/ssr` | `~21.0.0` | Server-side rendering |
+| `@nx/angular` | `~22.2.0` | Nx workspace |
+| `@ng-bootstrap/ng-bootstrap` | `~20.0.0` | Bootstrap component bindings |
+| `@ngx-validate/core` | `^0.2.0` | Reactive form validators |
+| `@ngneat/spectator` | `~19.6.2` | Test helpers |
+| `@fortawesome/fontawesome-free` | `^6.0.0` | Icon set |
+| `@abp/ng.theme.lepton-x` | `~5.2.0-rc.3` | LeptonX theme (matches `LeptonXVersion` in `common.props`) |
+| `@abp/utils` | `~10.2.0-rc.3` | shared JS utilities (matches framework `Version`) |
+| `@angular-eslint/eslint-plugin`, `template-parser` | `~21.0.0` | Linting |
+
+The build is orchestrated via `nx run-many --target=build --all`, defined in the `scripts` section of `package.json`. Schematics are built separately from `npm/ng-packs/scripts/`.
+
+### `npm/packs/` — MVC bundles
+
+`npm/packs/` ships static-asset NPM packages used by the MVC UI: `@abp/aspnetcore.mvc.ui`, `@abp/aspnetcore.mvc.ui.theme.basic`, `@abp/jquery`, `@abp/bootstrap`, etc. Each package wraps a vendored copy of a frontend library so the ASP.NET Core bundling pipeline (`Volo.Abp.AspNetCore.Mvc.UI.Bundling`) can resolve it relative to `wwwroot/libs/`.
+
+The full list is rendered by Lerna at publish time — `npm/publish-mvc.ps1` runs `lerna publish` from `npm/packs/`.
+
+## Version cross-walk
+
+Knowing one ABP version, you can derive the others:
+
+| What | Where | Example for v10.2.0-rc.3 |
+|---|---|---|
+| Framework / NuGet packages | `common.props` → `<Version>` | `10.2.0-rc.3` |
+| LeptonX theme | `common.props` → `<LeptonXVersion>` | `5.2.0-rc.3` |
+| Angular libs | `npm/ng-packs/package.json` → `version` of `@abp/*` | `~10.2.0-rc.3` |
+| MVC NPM packs | `npm/packs/*/package.json` | `~10.2.0-rc.3` |
+| .NET SDK | `global.json` → `sdk.version` | `10.0.100` |
+| Microsoft.* runtime | `Directory.Packages.props` (most entries) | `10.0.2` |
+| Public version manifest | `latest-versions.json` | top entry |
+
+<Tip>
+  Run `pwsh ./npm/preview-publish.ps1` against a local Verdaccio to verify
+  the npm package versions match the NuGet `<Version>` before releasing —
+  out-of-sync NPM and NuGet versions confuse the CLI's "update solution"
+  workflow.
+</Tip>
+
+## Pinning vs floating
+
+ABP pins exact versions almost everywhere (e.g. `Version="10.0.2"`, not `[10.0.*]`). The reasons:
+
+1. **Reproducible CI builds** — `nupkg/0/` contains the same bits on every agent.
+2. **Predictable consumer behaviour** — `dotnet add package Volo.Abp.Identity` always resolves the same transitive set.
+3. **Single point of upgrade** — bumping EF Core means one PR touching one line in `Directory.Packages.props`.
+
+The single concession is `CentralPackageFloatingVersionsEnabled=true` in `Directory.Packages.props`, kept on for future flexibility but not yet used by any `<PackageVersion>` entry.
+
+## Looking up "which ABP package needs X?"
+
+Three quick recipes:
+
+1. **By library name** — search `framework/src/**/Volo.Abp.*.csproj` for `<PackageReference Include="LIBRARY_NAME"`. Results are short because central package management forbids per-csproj versions.
+2. **By ABP package** — open the csproj. It will list its `<PackageReference>` items but no versions; cross-reference each name with `Directory.Packages.props` for the resolved version.
+3. **By transitive graph** — `dotnet nuget why Volo.Abp.Identity Autofac` answers "why does my project end up referencing Autofac through Volo.Abp.Identity?".
+
+## Related wiki pages
+
+- [/overview/solution-and-build](/overview/solution-and-build) — how `Directory.Packages.props` is wired into the build.
+- [/overview/repository-layout](/overview/repository-layout) — where every `Volo.Abp.*` package lives.
+- [/overview/modularity-model](/overview/modularity-model) — the runtime that composes these libraries.
+- [/core/dependency-injection](/core/dependency-injection) — Autofac vs `Microsoft.Extensions.DependencyInjection`.
+- [/core/dynamic-proxy-and-interceptors](/core/dynamic-proxy-and-interceptors) — Castle.Core in detail.
+- [/data/entity-framework-core](/data/entity-framework-core) — the EF Core 10.0.2 wrappers.
+- [/data/mongodb](/data/mongodb) — MongoDB.Driver 3.7.0.
+- [/infrastructure/event-bus](/infrastructure/event-bus) — Rebus, RabbitMQ, Kafka, Azure Service Bus, Dapr.
+- [/infrastructure/background-jobs-and-workers](/infrastructure/background-jobs-and-workers) — Hangfire, Quartz, TickerQ.
+- [/infrastructure/blob-storing](/infrastructure/blob-storing) — Azure / AWS / Aliyun / Google / Minio / Bunny / FileSystem.
+- [/infrastructure/caching](/infrastructure/caching) — `Microsoft.Extensions.Caching` + StackExchange.Redis.
+- [/angular/overview](/angular/overview) — the `npm/ng-packs/` workspace in depth.
+- [/build-deploy/release-pipeline](/build-deploy/release-pipeline) — publishing both NuGet and npm.
