@@ -1,7 +1,7 @@
 ---
-title: "BLOB providers: FileSystem, Azure, AWS, GCS, Aliyun, Minio, Bunny"
+title: "BLOB providers: FileSystem, Azure, AWS, Aliyun, GCS, Minio"
 sidebarTitle: "BLOB Providers"
-description: "Catalog of ABP IBlobProvider packages with their options, naming normalizers and Use* extension methods for plugging cloud storage backends into containers."
+description: "Catalog of ABP IBlobProvider packages with their options, naming normalizers and Use* extensions for plugging cloud storage backends into containers."
 ---
 
 ABP Framework ships eight first-party `IBlobProvider` packages plus an EF Core/Mongo-backed database provider in a separate module. This page is the reference table for each provider — the assembly, the `IBlobProvider` implementation, the strongly typed configuration class, the `Use*` extension that wires it to a container, the naming normalizer, and the small differences that matter (credentials, container auto-creation, multi-tenant naming). Read it after [/infrastructure/blob-storing](/infrastructure/blob-storing) so the abstractions are familiar.
@@ -259,4 +259,4 @@ Configure<AbpBlobStoringOptions>(o =>
 - [/infrastructure/blob-storing](/infrastructure/blob-storing) — `IBlobContainer`, factory, multi-tenancy.
 - [/modules/blob-storing-database](/modules/blob-storing-database) — EF Core/Mongo provider.
 - [/infrastructure/caching](/infrastructure/caching) — `IDistributedCache` used by AWS/Aliyun temporary credential caching.
-- [/multi-tenancy/data-isolation](/multi-tenancy/data-isolation) — how `IsMultiTenant` interacts with tenant context.
+- [/multi-tenancy/aspnetcore-multitenancy](/multi-tenancy/aspnetcore-multitenancy) — how `IsMultiTenant` interacts with tenant context.

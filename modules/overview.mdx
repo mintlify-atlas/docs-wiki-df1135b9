@@ -1,5 +1,5 @@
 ---
-title: "Application Modules — Catalog and Cross-Module Architecture"
+title: "Application Modules — Catalog & Cross-Module Architecture"
 sidebarTitle: "Modules Overview"
 description: "Catalog of the 18 prebuilt ABP application modules under modules/ — identity, account, permission, settings, features, tenants, audit, jobs, blobs, CMS."
 ---
@@ -12,7 +12,7 @@ This page is a directory of every module folder under `modules/` and what it shi
 
 The `modules/README.md` and a directory listing of `modules/` show 18 module roots (plus a README):
 
-```
+```text
 modules/
 ├── account/                       OAuth/OIDC login UI, register, profile, IS4/OpenIddict variants
 ├── audit-logging/                 AuditLog aggregate + IAuditingStore implementation
@@ -68,7 +68,7 @@ A ✅ means the module ships a dedicated package for that stack (for example `Vo
 
 Every module under `modules/` follows the layered DDD structure described in the [DDD Overview](/ddd/domain-entities-and-aggregates). Taking `modules/identity/src/` as the canonical example:
 
-```
+```text
 modules/identity/src/
 ├── Volo.Abp.Identity.Domain.Shared/        Constants, enums, error codes, localization keys
 ├── Volo.Abp.Identity.Domain/               Aggregates, managers, repositories interfaces, settings

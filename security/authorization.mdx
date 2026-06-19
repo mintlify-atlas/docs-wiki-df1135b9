@@ -1,7 +1,7 @@
 ---
 title: "Authorization Pipeline: Policies, Interceptors, Handlers"
 sidebarTitle: "Authorization"
-description: "Inside Volo.Abp.Authorization — how AuthorizationInterceptor, AbpAuthorizationPolicyProvider, and PermissionRequirementHandler turn attributes into checks."
+description: "Inside Volo.Abp.Authorization — how AuthorizationInterceptor, AbpAuthorizationPolicyProvider, and PermissionRequirementHandler evaluate Authorize."
 ---
 
 The ABP Framework authorization pipeline lives in two packages — `Volo.Abp.Authorization.Abstractions` (contracts) and `Volo.Abp.Authorization` (implementation) — and layers a permission system on top of ASP.NET Core's `Microsoft.AspNetCore.Authorization` primitives. This page walks through `AbpAuthorizationModule` startup wiring, the dynamic-proxy `AuthorizationInterceptor`, how `AbpAuthorizationPolicyProvider` synthesizes policies from permission definitions, and how `PermissionRequirementHandler` flows through `IPermissionChecker`. Companion pages cover permission definitions ([Permissions](/security/permissions)) and the [Security Abstractions](/security/security-abstractions) that supply the `ClaimsPrincipal`.

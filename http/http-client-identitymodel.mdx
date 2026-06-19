@@ -4,7 +4,7 @@ sidebarTitle: "IdentityModel Client"
 description: "How Volo.Abp.Http.Client.IdentityModel attaches Bearer tokens — variants for Web, WebAssembly and MauiBlazor with the IAbpAccessTokenProvider chain."
 ---
 
-The ABP Framework `Volo.Abp.Http.Client.IdentityModel` family of packages plugs Duende IdentityModel (formerly `IdentityModel.OidcClient`) into the dynamic-HTTP-client pipeline so that outbound proxy calls carry an OAuth2 Bearer token. The base package handles the headless client-credentials case; three siblings — `.Web`, `.WebAssembly`, and `.MauiBlazor` — each adapt the base authenticator to a different UI stack's notion of "the current user's access token". This page walks every file in those four projects, the `RemoteServiceConfiguration` extension methods that drive their behaviour, and how the `[Dependency(ReplaceServices = true)]` chain selects the right authenticator at runtime.
+The ABP Framework `Volo.Abp.Http.Client.IdentityModel` family of packages plugs Duende IdentityModel (the renamed successor of the `IdentityModel` NuGet package) into the dynamic-HTTP-client pipeline so that outbound proxy calls carry an OAuth2 Bearer token. The base package handles the headless client-credentials case; three siblings — `.Web`, `.WebAssembly`, and `.MauiBlazor` — each adapt the base authenticator to a different UI stack's notion of "the current user's access token". This page walks every file in those four projects, the `RemoteServiceConfiguration` extension methods that drive their behaviour, and how the `[Dependency(ReplaceServices = true)]` chain selects the right authenticator at runtime.
 
 ## Package family
 

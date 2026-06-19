@@ -18,7 +18,7 @@ The repository is rooted at the GitHub slug `abpframework/abp` (declared in `Dir
 
 ## Top-Level Tree
 
-```
+```text
 abp/
 ├── framework/          # Core framework — 169 src packages
 ├── modules/            # 19 application modules (Identity, CmsKit, ...)
@@ -95,21 +95,21 @@ Every direct child of `framework/src/` is a single NuGet package that ships as `
 | `Volo.Abp.Core` + `Volo.Abp` | 2 | `Volo.Abp.Core` (modularity, DI, exception handling); `Volo.Abp` (the all-in-one umbrella package) | [/core/overview](/core/overview) |
 | `Volo.Abp.AspNetCore.*` | 38 | `Volo.Abp.AspNetCore`, `Volo.Abp.AspNetCore.Mvc`, `Volo.Abp.AspNetCore.Mvc.UI.Theme.Shared`, `Volo.Abp.AspNetCore.SignalR`, `Volo.Abp.AspNetCore.Components.WebAssembly`, `Volo.Abp.AspNetCore.Components.MauiBlazor`, plus 16 Mvc-prefixed packages and 12 Components-prefixed packages | [/aspnetcore/overview](/aspnetcore/overview), [/blazor/overview](/blazor/overview) |
 | `Volo.Abp.EntityFrameworkCore.*` | 8 | `Volo.Abp.EntityFrameworkCore` (provider-neutral base) + `.MySQL`, `.MySQL.Pomelo`, `.Oracle`, `.Oracle.Devart`, `.PostgreSql`, `.Sqlite`, `.SqlServer` | [/data/entity-framework-core](/data/entity-framework-core) |
-| `Volo.Abp.EventBus.*` | 7 | `Volo.Abp.EventBus`, `.Abstractions`, `.Azure`, `.Dapr`, `.Kafka`, `.RabbitMQ`, `.Rebus` | [/infrastructure/event-bus](/infrastructure/event-bus) |
+| `Volo.Abp.EventBus.*` | 7 | `Volo.Abp.EventBus`, `.Abstractions`, `.Azure`, `.Dapr`, `.Kafka`, `.RabbitMQ`, `.Rebus` | [/infrastructure/event-bus-local](/infrastructure/event-bus-local) |
 | `Volo.Abp.BlobStoring.*` | 9 | `Volo.Abp.BlobStoring`, `.Aliyun`, `.Aws`, `.Azure`, `.Bunny`, `.FileSystem`, `.Google`, `.Memory`, `.Minio` | [/infrastructure/blob-storing](/infrastructure/blob-storing) |
-| `Volo.Abp.BackgroundJobs.*` + `Volo.Abp.BackgroundWorkers.*` | 10 | `BackgroundJobs` (default queue), `.Abstractions`, `.HangFire`, `.Quartz`, `.RabbitMQ`, `.TickerQ`; `BackgroundWorkers`, `.Hangfire`, `.Quartz`, `.TickerQ` | [/infrastructure/background-jobs-and-workers](/infrastructure/background-jobs-and-workers) |
-| `Volo.Abp.Http.*` + `Volo.Abp.IdentityModel` | 9 | `Http`, `.Abstractions`, `.Client`, `.Client.Dapr`, `.Client.IdentityModel`, `.Client.IdentityModel.Web/.MauiBlazor/.WebAssembly`, `.Client.Web` | [/infrastructure/http-client-and-remote-services](/infrastructure/http-client-and-remote-services) |
+| `Volo.Abp.BackgroundJobs.*` + `Volo.Abp.BackgroundWorkers.*` | 10 | `BackgroundJobs` (default queue), `.Abstractions`, `.HangFire`, `.Quartz`, `.RabbitMQ`, `.TickerQ`; `BackgroundWorkers`, `.Hangfire`, `.Quartz`, `.TickerQ` | [/infrastructure/background-jobs](/infrastructure/background-jobs) |
+| `Volo.Abp.Http.*` + `Volo.Abp.IdentityModel` | 9 | `Http`, `.Abstractions`, `.Client`, `.Client.Dapr`, `.Client.IdentityModel`, `.Client.IdentityModel.Web/.MauiBlazor/.WebAssembly`, `.Client.Web` | [/http/overview](/http/overview) |
 | `Volo.Abp.TextTemplating.*` | 4 | `TextTemplating`, `.Core`, `.Razor`, `.Scriban` | [/infrastructure/text-templating](/infrastructure/text-templating) |
 | `Volo.Abp.Imaging.*` | 5 | `.Abstractions`, `.AspNetCore`, `.ImageSharp`, `.MagickNet`, `.SkiaSharp` | [/infrastructure/imaging](/infrastructure/imaging) |
 | `Volo.Abp.Caching.*` | 2 | `Volo.Abp.Caching`, `.StackExchangeRedis` | [/infrastructure/caching](/infrastructure/caching) |
-| `Volo.Abp.Auditing.*` | 2 | `Volo.Abp.Auditing`, `Volo.Abp.Auditing.Contracts` | [/crosscutting/auditing](/crosscutting/auditing) |
-| `Volo.Abp.Authorization.*` | 2 | `Volo.Abp.Authorization`, `.Abstractions` | [/crosscutting/authorization-and-permissions](/crosscutting/authorization-and-permissions) |
+| `Volo.Abp.Auditing.*` | 2 | `Volo.Abp.Auditing`, `Volo.Abp.Auditing.Contracts` | [/infrastructure/auditing](/infrastructure/auditing) |
+| `Volo.Abp.Authorization.*` | 2 | `Volo.Abp.Authorization`, `.Abstractions` | [/security/authorization](/security/authorization) |
 | `Volo.Abp.Validation.*` | 2 | `Volo.Abp.Validation`, `.Abstractions` (plus FluentValidation adapter) | [/crosscutting/validation](/crosscutting/validation) |
 | `Volo.Abp.Localization.*` | 2 | `Volo.Abp.Localization`, `.Abstractions` | [/crosscutting/localization](/crosscutting/localization) |
 | `Volo.Abp.Json.*` | 4 | `Json`, `.Abstractions`, `.Newtonsoft`, `.SystemTextJson` | [/infrastructure/json-serialization](/infrastructure/json-serialization) |
 | `Volo.Abp.MultiTenancy.*` | 3 | `Volo.Abp.MultiTenancy`, `.Abstractions`, plus `Volo.Abp.AspNetCore.MultiTenancy` | [/multi-tenancy/overview](/multi-tenancy/overview) |
 | `Volo.Abp.Ddd.*` | 4 | `Ddd.Domain.Shared`, `Ddd.Domain`, `Ddd.Application.Contracts`, `Ddd.Application` | [/ddd/overview](/ddd/overview) |
-| `Volo.Abp.Sms.*` | 3 | `Sms`, `.Aliyun`, `.TencentCloud` | [/infrastructure/sms-and-emailing](/infrastructure/sms-and-emailing) |
+| `Volo.Abp.Sms.*` | 3 | `Sms`, `.Aliyun`, `.TencentCloud` | [/infrastructure/emailing-and-mailkit](/infrastructure/emailing-and-mailkit) |
 | `Volo.Abp.Ldap.*` | 2 | `Ldap`, `.Abstractions` | — |
 | `Volo.Abp.AI.*` | 2 | `AI`, `.Abstractions` (Semantic Kernel / MCP integration) | — |
 | `Volo.Abp.DistributedLocking.*` | 3 | `DistributedLocking`, `.Abstractions`, `.Dapr` | [/infrastructure/distributed-locking](/infrastructure/distributed-locking) |
@@ -234,7 +234,7 @@ The PowerShell pipeline that builds the entire repo lives in three folders that 
 | `tools/localization-key-synchronizer/` | Keeps `Localization/Resources/*.json` files in sync across locales. |
 | `tools/smtp-prober-email-sender.exe` | Diagnostic SMTP client used while developing `Volo.Abp.MailKit`. |
 
-The mechanics of each script are explained in detail in [/build-deploy/build-system](/build-deploy/build-system) and [/build-deploy/release-pipeline](/build-deploy/release-pipeline).
+The mechanics of each script are explained in detail in [/build-deploy/build-scripts](/build-deploy/build-scripts) and [/build-deploy/deploy-scripts](/build-deploy/deploy-scripts).
 
 ## `docs/` — the documentation site
 
@@ -273,7 +273,7 @@ The mechanics of each script are explained in detail in [/build-deploy/build-sys
 | `ai-rules/common/infrastructure.mdc` | Event bus, background jobs, caching. |
 | `ai-rules/common/multi-tenancy.mdc` | Tenant context handling. |
 | `ai-rules/data/ef-core.mdc` | EF Core specifics — `IRepository<T>`, `DbContext`. |
-| `ai-rules/data/mongodb.mdc` | MongoDB-specific repository wiring. |
+| `ai-rules/data/mongodb-integration.mdc` | MongoDB-specific repository wiring. |
 | `ai-rules/template-specific/app-nolayers.mdc`, `microservice.mdc`, `module.mdc` | Template-specific guidance. |
 | `ai-rules/testing/patterns.mdc` | xUnit + `AbpIntegratedTest<T>` patterns. |
 | `ai-rules/ui/angular.mdc`, `blazor.mdc`, `mvc.mdc` | Per-UI guidance. |
@@ -325,15 +325,15 @@ The wiki organizes the same code along different axes. Use this matrix to jump b
 | `framework/src/Volo.Abp.Ddd.Domain/` | [/ddd/domain-entities-and-aggregates](/ddd/domain-entities-and-aggregates) |
 | `framework/src/Volo.Abp.Data/` | [/data/overview](/data/overview) |
 | `framework/src/Volo.Abp.EntityFrameworkCore*/` | [/data/entity-framework-core](/data/entity-framework-core) |
-| `framework/src/Volo.Abp.MongoDB/` | [/data/mongodb](/data/mongodb) |
+| `framework/src/Volo.Abp.MongoDB/` | [/data/mongodb-integration](/data/mongodb-integration) |
 | `framework/src/Volo.Abp.MultiTenancy*/` | [/multi-tenancy/overview](/multi-tenancy/overview) |
-| `framework/src/Volo.Abp.EventBus*/` | [/infrastructure/event-bus](/infrastructure/event-bus) |
+| `framework/src/Volo.Abp.EventBus*/` | [/infrastructure/event-bus-local](/infrastructure/event-bus-local) |
 | `framework/src/Volo.Abp.BlobStoring*/` | [/infrastructure/blob-storing](/infrastructure/blob-storing) |
-| `framework/src/Volo.Abp.BackgroundJobs*/`, `*/BackgroundWorkers*/` | [/infrastructure/background-jobs-and-workers](/infrastructure/background-jobs-and-workers) |
+| `framework/src/Volo.Abp.BackgroundJobs*/`, `*/BackgroundWorkers*/` | [/infrastructure/background-jobs](/infrastructure/background-jobs) |
 | `framework/src/Volo.Abp.Cli*/` | [/cli/overview](/cli/overview) |
 | `templates/` | [/templates/overview](/templates/overview) |
 | `modules/` | [/modules/overview](/modules/overview) |
-| `build/`, `deploy/`, `nupkg/` | [/build-deploy/build-system](/build-deploy/build-system), [/build-deploy/release-pipeline](/build-deploy/release-pipeline) |
+| `build/`, `deploy/`, `nupkg/` | [/build-deploy/build-scripts](/build-deploy/build-scripts), [/build-deploy/deploy-scripts](/build-deploy/deploy-scripts) |
 | `Directory.Packages.props` | [/overview/tech-stack-and-dependencies](/overview/tech-stack-and-dependencies) |
 | `framework/Volo.Abp.slnx`, `*.abpsln`, `*.abpmdl` | [/overview/solution-and-build](/overview/solution-and-build) |
 

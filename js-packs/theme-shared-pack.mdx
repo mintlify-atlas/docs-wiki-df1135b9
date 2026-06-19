@@ -378,7 +378,7 @@ The Blazor Server counterpart at `npm/packs/aspnetcore.components.server.theming
 
 Notice how stripped-down this manifest is — no SweetAlert2, no DataTables, no Select2. Blazor circuits replace DOM imperatively, so most jQuery-era plug-ins are unnecessary. The matching C# project is `framework/src/Volo.Abp.AspNetCore.Components.Server.Theming/`, which provides three bundling contributors and a manager:
 
-```
+```text
 Volo.Abp.AspNetCore.Components.Server.Theming/
 ├── AbpAspNetCoreComponentsServerThemingModule.cs
 └── Bundling/

@@ -1,7 +1,7 @@
 ---
-title: "Virtual File Explorer — Inspect Embedded Resources at Runtime"
+title: "Virtual File Explorer — Inspect Embedded VFS at Runtime"
 sidebarTitle: "VFS Explorer"
-description: "Use ABP Framework's Virtual File Explorer to browse embedded virtual files and view their contents from a Razor admin page."
+description: "Use ABP Framework's Virtual File Explorer module to browse embedded virtual files and view their contents from a Razor admin page."
 ---
 
 The **Virtual File Explorer** module is a small but invaluable diagnostic tool that exposes ABP Framework's *virtual file system* (VFS) through a Razor-pages admin UI. Every module in ABP ships its localization JSON, view templates, JavaScript bundles and the like as embedded resources inside the assembly; once a host application bootstraps, those files appear inside the in-memory virtual file tree. The Virtual File Explorer lets a developer or operator browse that tree, paginate through directories, and view file contents — without unpacking DLLs, without restarting the host. The code lives at `modules/virtual-file-explorer/src/` and is intentionally minimal: a contracts assembly, an installer, and a Web assembly that ships the Razor pages and bundling.

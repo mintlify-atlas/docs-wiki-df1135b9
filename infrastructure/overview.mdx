@@ -1,7 +1,7 @@
 ---
 title: "Infrastructure Overview: Audit, Cache, Events, Jobs"
 sidebarTitle: "Overview"
-description: "Map of ABP Framework infrastructure packages — auditing, distributed caching, local and distributed event buses, and background job providers — by source path."
+description: "Map of ABP Framework infrastructure packages: auditing, distributed caching, local and distributed event buses and background jobs, by source path."
 ---
 
 This page is a map of the **ABP Framework infrastructure layer**: the cross‑cutting packages that sit beneath every application service but above the persistence and module systems. The four families covered here — auditing, caching, event bus, and background jobs — are all wired through the same patterns (`AbpModule` boot, `IOptions<>` configuration, interceptor/interface contracts) but each ships several concrete provider packages so consuming applications can swap implementations without touching domain code. This overview lists those packages, the contract types they implement, and the swap‑points between abstractions and providers.

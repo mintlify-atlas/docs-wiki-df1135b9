@@ -1,5 +1,5 @@
 ---
-title: "Repository Tools — changelog, localization, nuget.exe, cleanup"
+title: "Repository Tools — changelog, localization, nuget, cleanup"
 sidebarTitle: "Tools"
 description: "Reads tools/github-changelog-generator, localization-key-synchronizer, tools/nuget/nuget.exe, delete-bin-obj.ps1 and smtp-prober-email-sender.exe."
 ---
@@ -17,8 +17,8 @@ The ABP Framework repository ships a small toolbox of one-off utilities that don
 | `tools/localization-key-synchronizer/LocalizationKeySynchronizer.slnx` | Solution    | Maintainer | Visual Studio entry point                          |
 | `tools/localization-key-synchronizer/src/`              | C# source             | Maintainer | Spectre.Console-driven menu                        |
 | `tools/nuget/nuget.exe`                                 | NuGet client          | Build      | Used by older bench scripts; modern flow uses `dotnet nuget` |
-| `delete-bin-obj.ps1`                                    | PowerShell            | Anyone     | Wipe `bin/` and `obj/` everywhere                  |
-| `smtp-prober-email-sender.exe`                          | .NET console          | Anyone     | Smoke-test email module without spinning a real SMTP server |
+| `delete-bin-obj.ps1` (repo root)                        | PowerShell            | Anyone     | Wipe `bin/` and `obj/` everywhere                  |
+| `tools/smtp-prober-email-sender.exe`                    | .NET console          | Anyone     | Smoke-test email module without spinning a real SMTP server |
 
 ## github-changelog-generator
 
@@ -193,9 +193,9 @@ The `\\node_modules\\` guard exists because several npm packages cache build art
 
 Typical use is before a release rebuild, when contributors want to be certain `dotnet build` is not reusing a stale `obj/project.assets.json` from a since-deleted package reference.
 
-## smtp-prober-email-sender.exe
+## tools/smtp-prober-email-sender.exe
 
-`smtp-prober-email-sender.exe` is a small standalone .NET console that ABP keeps at the repo root to verify the `Volo.Abp.MailKit` integration without spinning a real SMTP server. The maintainers built it as a smoke probe — point it at an `appsettings.json` containing SMTP host/port/credentials and it sends one test message:
+`tools/smtp-prober-email-sender.exe` is a small standalone .NET console that ABP keeps under `tools/` to verify the `Volo.Abp.MailKit` integration without spinning a real SMTP server. The maintainers built it as a smoke probe — point it at an `appsettings.json` containing SMTP host/port/credentials and it sends one test message:
 
 | Use case                                              | Why                                                          |
 | ----------------------------------------------------- | ------------------------------------------------------------ |

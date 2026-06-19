@@ -186,7 +186,7 @@ public static string Memory => Path.Combine(
 
 That deliberately puts the file beside the dotnet-tool DLL — wiping `~/.abp/` does not affect it — which makes the cache survive across re-logins. The format is a plain text file with one line per key:
 
-```
+```text
 LatestCliVersionCheckDate ||| 2024-12-09T13:55:22
 McpToolsLastFetchDate ||| 2024-12-10T08:01:11
 ```

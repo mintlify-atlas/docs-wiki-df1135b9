@@ -1,23 +1,23 @@
 ---
 title: "Solution Templates Overview: Catalog and Build Pipeline"
 sidebarTitle: "Overview"
-description: "Catalog of every ABP Framework solution template under templates/, their on-disk layout, output UI options, and the abp new pipeline that materializes them."
+description: "Catalog of every ABP Framework solution template under templates/, the on-disk layout, UI options, and the abp new pipeline that materializes them."
 ---
 
-The `templates/` folder at the root of `abpframework/abp` is the source of every project skeleton emitted by the `abp new` CLI command. ABP Framework ships eight first-party templates here, each authored as a real, compilable solution (with `MyCompanyName.MyProjectName` placeholders) that is later zipped, downloaded by `Volo.Abp.Cli.Core`, and rewritten on the developer's machine. This page enumerates every directory, indexes the UI/database options each template exposes, and walks the dispatch path from `abp new <name>` through `TemplateProjectBuilder` to the final files on disk.
+The `templates/` folder at the root of `abpframework/abp` is the source of every project skeleton emitted by the `abp new` CLI command. ABP Framework ships six first-party templates here, each authored as a real, compilable solution (with `MyCompanyName.MyProjectName` placeholders) that is later zipped, downloaded by `Volo.Abp.Cli.Core`, and rewritten on the developer's machine. This page enumerates every directory, indexes the UI/database options each template exposes, and walks the dispatch path from `abp new <name>` through `TemplateProjectBuilder` to the final files on disk.
 
 ## Template inventory
 
-The eight top-level template folders are visible at the root of `templates/` alongside three shared files: `Directory.Packages.props`, `NuGet.Config`, and `zip-templates.ps1`. Every folder is self-contained — it is the archive root that the CLI later expands.
+The six top-level template folders are visible at the root of `templates/` alongside three shared files: `Directory.Packages.props`, `NuGet.Config`, and `zip-templates.ps1`. Every folder is self-contained — it is the archive root that the CLI later expands.
 
 | Template name (CLI) | Source folder | Output kind | Solution file | UI options |
 |---|---|---|---|---|
 | `app` | `templates/app/` | Layered DDD startup | `MyCompanyName.MyProjectName.slnx` | MVC, Blazor Server, Blazor WebAssembly, Blazor WebApp, Angular, MAUI Blazor, None |
 | `app-nolayers` | `templates/app-nolayers/` | Single-project startup | `MyCompanyName.MyProjectName.slnx` | MVC, Blazor Server, Blazor WebAssembly, Angular |
 | `module` | `templates/module/` | Reusable module skeleton | `MyCompanyName.MyProjectName.slnx` (+ `.abpmdl`) | MVC, Blazor (Server & WASM), Angular |
-| `console` | `templates/console/` | Console host | (no slnx) | n/a |
-| `maui` | `templates/maui/` | .NET MAUI startup | (no slnx) | MAUI |
-| `wpf` | `templates/wpf/` | WPF desktop app | (no slnx) | WPF |
+| `console` | `templates/console/` | Console host | `MyCompanyName.MyProjectName.slnx` | n/a |
+| `maui` | `templates/maui/` | .NET MAUI startup | `MyCompanyName.MyProjectName.slnx` | MAUI |
+| `wpf` | `templates/wpf/` | WPF desktop app | `MyCompanyName.MyProjectName.slnx` | WPF |
 
 The three shared files at `templates/` apply when zipping and when restoring the generated project. `templates/zip-templates.ps1` archives each child folder into `<name>-<version>.zip`. `templates/Directory.Packages.props` neutralises central package management, and `templates/NuGet.Config` provides an empty `packageSources` element copied into each generated solution.
 
@@ -60,11 +60,13 @@ Two siblings of `zip-templates.ps1` ship inside every layered or nolayer solutio
 <?xml version="1.0" encoding="utf-8"?>
 <configuration>
   <packageSources>
+    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+    <add key="ABP Nightly" value="https://www.myget.org/F/abp-nightly/api/v3/index.json" />
   </packageSources>
 </configuration>
 ```
 
-`Directory.Packages.props` deliberately disables central package management because each `*.csproj` pins its own versions (e.g. `Serilog.AspNetCore` 9.0.0, `Microsoft.AspNetCore.DataProtection.StackExchangeRedis` 10.0.2). `NuGet.Config` is an intentional blank — the `UpdateNuGetConfigStep` in `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/Templates/UpdateNuGetConfigStep.cs` later injects the appropriate `nuget.org` / `abp.io` sources at generation time.
+`Directory.Packages.props` deliberately disables central package management because each `*.csproj` pins its own versions (e.g. `Serilog.AspNetCore` 9.0.0, `Microsoft.AspNetCore.DataProtection.StackExchangeRedis` 10.0.2). `NuGet.Config` ships with the public `nuget.org` feed and the ABP nightly MyGet feed — the `UpdateNuGetConfigStep` in `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/ProjectBuilding/Templates/UpdateNuGetConfigStep.cs` later edits this file (typically removing the nightly feed) based on the user's CLI options at generation time.
 
 ## `abp new` to disk: pipeline summary
 

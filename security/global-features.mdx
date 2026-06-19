@@ -1,7 +1,7 @@
 ---
 title: "Global Features: Compile-Time Toggles, Manager, Interceptor"
 sidebarTitle: "Global Features"
-description: "How Volo.Abp.GlobalFeatures lets modules ship features that the host enables at startup — via GlobalFeature, GlobalFeatureManager, and RequiresGlobalFeatureAttribute."
+description: "How Volo.Abp.GlobalFeatures lets modules ship features the host toggles at startup — via GlobalFeature, GlobalFeatureManager, and RequiresGlobalFeature."
 ---
 
 `Volo.Abp.GlobalFeatures` in the ABP Framework is a *startup-time* toggle system, deliberately distinct from per-tenant `Volo.Abp.Features` ([Features](/security/features-and-feature-management)). Where the latter answers "does this tenant's plan include X?", global features answer "is this entire subsystem in play at all?" — a decision the host bakes in during `PreConfigureServices`. This page walks through `GlobalFeatureManager`, the marker types (`GlobalFeature`, `GlobalModuleFeatures`), `RequiresGlobalFeatureAttribute`, the `GlobalFeatureInterceptor`, and the orthogonal `DisableAbpFeaturesAttribute` opt-out.

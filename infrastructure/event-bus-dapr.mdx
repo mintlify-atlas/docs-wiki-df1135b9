@@ -1,14 +1,14 @@
 ---
-title: "Dapr Event Bus Provider: pub/sub Topics for ABP"
+title: "Dapr Event Bus Provider: pub/sub Topics for ABP Apps"
 sidebarTitle: "Dapr"
-description: "DaprDistributedEventBus uses a configurable PubSubName and one topic per event name; AbpDaprEventData carries MessageId, CorrelationId and the JSON ETO body."
+description: "DaprDistributedEventBus uses a configurable PubSubName plus one topic per event; AbpDaprEventData carries MessageId, CorrelationId and the JSON ETO body."
 ---
 
 `Volo.Abp.EventBus.Dapr` adapts ABP's `IDistributedEventBus` to the **Dapr pub/sub building block**. The Dapr sidecar handles the transport (Redis Streams, Azure Service Bus, Kafka, NATS, …); ABP only constructs `AbpDaprEventData` envelopes and calls `DaprClient.PublishEventAsync`. This page covers `DaprDistributedEventBus`, the `AbpDaprEventBusOptions.PubSubName` knob, the topic conventions, and how subscribers receive messages through `Volo.Abp.AspNetCore.Mvc.Dapr.EventBus`.
 
 ## Files
 
-```
+```text
 framework/src/Volo.Abp.EventBus.Dapr/Volo/Abp/EventBus/Dapr/
   AbpDaprEventBusOptions.cs
   AbpDaprEventData.cs

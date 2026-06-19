@@ -1,7 +1,7 @@
 ---
-title: "Object Extending"
+title: "ObjectExtensionManager, IHasExtraProperties and Validation"
 sidebarTitle: "Object Extending"
-description: "How the ABP Framework lets modules add extra properties to DTOs and entities through ObjectExtensionManager, IHasExtraProperties and the extensible-object validator."
+description: "How modules add extra properties to DTOs and entities via ObjectExtensionManager, IHasExtraProperties and the extensible-object validator pipeline."
 ---
 
 The ABP Framework's *object extending* system lets module consumers attach additional properties to types they do not own — most commonly DTOs and entities exported by reusable modules such as Identity or Tenant Management. The infrastructure ships in the `Volo.Abp.ObjectExtending` package and centres on three pieces: a singleton `ObjectExtensionManager` that holds the per-type property definitions, the `IHasExtraProperties` contract that gives objects a writable bag, and the `ExtensibleObjectValidator` that wires the definitions into the validation pipeline described in [Validation](/crosscutting/validation).

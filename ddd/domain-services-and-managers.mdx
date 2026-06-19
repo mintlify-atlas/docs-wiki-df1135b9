@@ -283,7 +283,7 @@ A common mistake is to put data-access concerns into a manager — calls like `_
 | Manager handles HTTP-specific concerns | Application service |
 | Manager imports `Microsoft.AspNetCore.*` | Refactor — `Domain` must not depend on ASP.NET |
 
-The `IUser` data-filter check `if (typeof(TEntity).IsAssignableFrom(IMultiTenant))` from `RepositoryBase` (covered on the [Repositories page](/ddd/domain-repositories)) is *not* a manager's job either — the repository handles it for you.
+Soft-delete and multi-tenant filtering — implemented by `RepositoryBase.ApplyDataFilters<TQueryable, TOtherEntity>` (covered on the [Repositories page](/ddd/domain-repositories)) — is *not* a manager's job either; the repository applies those `WhereIf` clauses automatically when the entity implements `ISoftDelete` or `IMultiTenant`.
 
 ## A summary chart
 

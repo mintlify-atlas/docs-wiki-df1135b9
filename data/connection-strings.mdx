@@ -254,7 +254,7 @@ flowchart TD
   TD -->|No| H
 ```
 
-The tenant directory entity owns its own `ConnectionStrings` collection; the resolver reads it via `ITenantStore` and falls back to the host config. The exact implementation is documented in [Multi‑tenancy connection strings](/multi-tenancy/connection-strings).
+The tenant directory entity owns its own `ConnectionStrings` collection; the resolver reads it via `ITenantStore` and falls back to the host config. The exact implementation is documented in [Multi‑tenancy connection strings](/multi-tenancy/tenant-configuration-store).
 
 ## Connection string check
 
@@ -370,10 +370,10 @@ This is what most callers use when they need the connection string for a known D
   <Card title="MongoDB" href="/data/mongodb-integration">
     `MongoDbContextProvider` also consults `IConnectionStringResolver`.
   </Card>
-  <Card title="Multi-tenancy" href="/multi-tenancy/connection-strings">
+  <Card title="Multi-tenancy" href="/multi-tenancy/tenant-configuration-store">
     The replacement resolver that adds tenant‑aware lookups.
   </Card>
-  <Card title="Modules" href="/core/modules">
+  <Card title="Modules" href="/core/modularity-and-modules">
     Where `AbpDbConnectionOptions` gets bound to `IConfiguration`.
   </Card>
 </CardGroup>

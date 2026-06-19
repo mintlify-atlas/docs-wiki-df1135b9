@@ -1,14 +1,14 @@
 ---
 title: "Rebus Event Bus: Pluggable Transports via Configurer"
 sidebarTitle: "Rebus"
-description: "RebusDistributedEventBus delegates to Rebus's IBus, exposes a Configurer hook for transport choice, and uses an Abp pipeline step to dedupe handler invocations."
+description: "RebusDistributedEventBus delegates to Rebus's IBus, exposes a Configurer hook for transport choice and adds an Abp step to dedupe handler invocations."
 ---
 
 `Volo.Abp.EventBus.Rebus` integrates ABP's `IDistributedEventBus` with **Rebus**, an open‑source .NET service bus that ships pluggable transports (RabbitMQ, Azure Service Bus, Amazon SQS, SQL Server, in‑memory, …). Rebus owns the wire format, ABP owns the publish/subscribe contract and the outbox/inbox. This page covers `RebusDistributedEventBus`, the `Configurer` callback in `AbpRebusEventBusOptions`, the `RebusDistributedEventHandlerAdapter<T>` pipeline step, and how the bus integrates with Rebus's per‑instance hosting (`startAutomatically: false`).
 
 ## Files
 
-```
+```text
 framework/src/Volo.Abp.EventBus.Rebus/Volo/Abp/EventBus/Rebus/
   AbpEventBusRebusModule.cs
   AbpRebusEventBusOptions.cs

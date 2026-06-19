@@ -394,16 +394,16 @@ The recursion cap is hard‑coded at `MaxCultureFallbackDepth = 5`. For most cul
 ## Related reading
 
 <CardGroup cols={2}>
-  <Card title="Localization" href="/core/localization">
+  <Card title="Localization" href="/crosscutting/localization">
     The UI‑string sibling, including how `DefaultLanguage` is configured.
   </Card>
-  <Card title="Entities" href="/ddd/entities-and-aggregates">
+  <Card title="Entities" href="/ddd/domain-entities-and-aggregates">
     `AggregateRoot<TKey>` carries the `Translations` collection by convention.
   </Card>
   <Card title="EF Core integration" href="/data/entity-framework-core">
     How `WithDetailsActions` automates the eager‑load of translation collections.
   </Card>
-  <Card title="Settings" href="/core/settings">
+  <Card title="Settings" href="/security/settings-runtime">
     `ISettingProvider` reads `LocalizationSettingNames.DefaultLanguage` for the final fallback step.
   </Card>
 </CardGroup>

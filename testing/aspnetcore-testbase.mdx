@@ -26,7 +26,7 @@ Every public symbol the package exports lives in `framework/src/Volo.Abp.AspNetC
 | `WebProjectPatchHelper.cs` | `GetWebProjectContentRootPathHelper` | Locates a web project's content root by walking up the directory tree. |
 | `DynamicProxying/AspNetCoreTestProxyHttpClientFactory.cs` | `AspNetCoreTestProxyHttpClientFactory` | Replaces the production `IProxyHttpClientFactory` so dynamic proxies hit `TestServer`. |
 
-The package also reads `appsettings.secrets.json` via the `AddAppSettingsSecretsJson()` extension from `Volo.Abp.AspNetCore`, used inside both `WebApplicationFactory.CreateHost` and the legacy `CreateHostBuilder`.
+The package also reads `appsettings.secrets.json` via the `AddAppSettingsSecretsJson()` extension from `Volo.Abp.Core` (`Microsoft/Extensions/Hosting/AbpHostingHostBuilderExtensions.cs`), used inside both `WebApplicationFactory.CreateHost` and the legacy `CreateHostBuilder`.
 
 ## The module
 

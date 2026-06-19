@@ -12,7 +12,7 @@ This page walks through the source under `modules/background-jobs/src/` — the 
 
 The module is intentionally narrow — no application service, HTTP API or admin UI ship in open source, because reading or cancelling jobs is a host-specific concern:
 
-```
+```text
 modules/background-jobs/src/
 ├── Volo.Abp.BackgroundJobs.Domain.Shared/         Consts, AbpBackgroundJobsDomainSharedModule
 ├── Volo.Abp.BackgroundJobs.Domain/                BackgroundJobRecord, BackgroundJobStore, Mapperly mappers

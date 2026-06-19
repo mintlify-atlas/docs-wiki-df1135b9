@@ -1,7 +1,7 @@
 ---
 title: "Widgets — Reusable, Resource-Aware View Components"
 sidebarTitle: "Widgets"
-description: "How ABP turns ViewComponent classes into widgets — [Widget] attribute, WidgetDefinition, IWidgetManager, AbpViewComponentHelper, and per-page resource collection."
+description: "How ABP turns ViewComponent classes into widgets — Widget attribute, WidgetDefinition, IWidgetManager, AbpViewComponentHelper, and asset collection."
 ---
 
 A widget in ABP is a view component plus metadata that describes the scripts, styles, and permissions it depends on. The widgets package — `Volo.Abp.AspNetCore.Mvc.UI.Widgets` — discovers them, renders them through a replaced `IViewComponentHelper`, and emits a deduplicated list of asset references for the page. This deep dive walks every type in `framework/src/Volo.Abp.AspNetCore.Mvc.UI.Widgets/Volo/Abp/AspNetCore/Mvc/UI/Widgets/`, shows how the `[Widget]` attribute is consumed at startup, and shows how a Razor page ends up rendering `<div class="abp-widget-wrapper" ...>` around the original view component.

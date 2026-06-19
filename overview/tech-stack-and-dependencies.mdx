@@ -1,7 +1,7 @@
 ---
 title: "Tech Stack: NuGet, npm and Every Pinned Dependency"
 sidebarTitle: "Tech Stack"
-description: "Every PackageVersion in Directory.Packages.props mapped to ABP packages, plus the npm/ng-packs side — EFCore, Autofac, OpenIddict, Serilog, OpenTelemetry, Angular."
+description: "Every PackageVersion in Directory.Packages.props mapped to ABP packages, plus the npm/ng-packs side — EF Core, Autofac, OpenIddict, Serilog, Angular."
 ---
 
 The ABP Framework is, at heart, an opinionated composition of well-known .NET libraries — and a parallel composition of npm packages on the Angular / MVC side. This page is the inventory: every `PackageVersion` declared in `Directory.Packages.props` matched to the `framework/src/Volo.Abp.*` packages that pull it in, plus the npm packages that drive `npm/ng-packs/` and `npm/packs/`. Use it to answer "what version of Autofac is ABP on?", "which package gives me MongoDB integration?", and "what versions of Angular ship with v10?".
@@ -126,7 +126,6 @@ See [/data/entity-framework-core](/data/entity-framework-core) for how ABP wraps
 | `Microsoft.NET.Test.Sdk` | `17.14.1` | every test project |
 | `Microsoft.VisualStudio.Web.CodeGeneration.Design` | `9.0.0` | template scaffolding |
 | `Microsoft.SourceLink.GitHub` | `8.0.0` | imported via `common.props` |
-| `Microsoft.SemanticKernel` | `1.71.0` | `Volo.Abp.AI`, `Volo.Abp.AI.Abstractions` |
 
 ## Dependency injection & dynamic proxy
 
@@ -171,7 +170,7 @@ See [/data/entity-framework-core](/data/entity-framework-core) for how ABP wraps
 | `MongoSandbox8.runtime.osx-arm64` | `2.0.0` | test runtime |
 | `MongoSandbox8.runtime.win-x64` | `2.0.0` | test runtime |
 
-See [/data/mongodb](/data/mongodb) for ABP's MongoDB repository surface.
+See [/data/mongodb-integration](/data/mongodb-integration) for ABP's MongoDB repository surface.
 
 ## Background jobs and scheduling
 
@@ -188,7 +187,7 @@ See [/data/mongodb](/data/mongodb) for ABP's MongoDB repository surface.
 | `TickerQ.Utilities` | `10.1.1` | `Volo.Abp.TickerQ` |
 | `TickerQ.EntityFrameworkCore` | `10.1.1` | `Volo.Abp.BackgroundJobs.TickerQ` |
 
-Three independently-versioned schedulers ship side-by-side. Pick one per host — see [/infrastructure/background-jobs-and-workers](/infrastructure/background-jobs-and-workers).
+Three independently-versioned schedulers ship side-by-side. Pick one per host — see [/infrastructure/background-jobs](/infrastructure/background-jobs).
 
 ## Messaging — event bus
 
@@ -200,7 +199,7 @@ Three independently-versioned schedulers ship side-by-side. Pick one per host �
 | `Rebus` | `8.8.0` | `Volo.Abp.EventBus.Rebus` |
 | `Rebus.ServiceProvider` | `10.5.0` | `Volo.Abp.EventBus.Rebus` |
 
-See [/infrastructure/event-bus](/infrastructure/event-bus).
+See [/infrastructure/event-bus-local](/infrastructure/event-bus-local).
 
 ## Blob storage providers
 
@@ -290,7 +289,7 @@ OpenIddict is the **default** auth server from v8 onward; IdentityServer 4 stays
 | `Serilog.Sinks.Console` | `6.0.0` | hosts |
 | `Serilog.Sinks.File` | `7.0.0` | hosts |
 
-ABP uses `Microsoft.Extensions.Logging` as the abstraction; Serilog is a recommended sink chain set up in every template. See [/core/logging-and-diagnostics](/core/logging-and-diagnostics).
+ABP uses `Microsoft.Extensions.Logging` as the abstraction; Serilog is a recommended sink chain set up in every template. See [/core/tracing-and-correlation](/core/tracing-and-correlation).
 
 ## Imaging
 
@@ -401,7 +400,7 @@ ABP's JavaScript artifacts are managed in two Lerna workspaces under `npm/`. The
 }
 ```
 
-These are the dev-time helpers that drive `replace-with-tilde.js`, `update-gulp.js`, and `package-update-script.js` — used by `npm/publish-mvc.ps1` and `npm/publish-ng.ps1` (see [/build-deploy/release-pipeline](/build-deploy/release-pipeline)).
+These are the dev-time helpers that drive `replace-with-tilde.js`, `update-gulp.js`, and `package-update-script.js` — used by `npm/publish-mvc.ps1` and `npm/publish-ng.ps1` (see [/build-deploy/deploy-scripts](/build-deploy/deploy-scripts)).
 
 ### `npm/ng-packs/package.json` — the Angular workspace
 
@@ -478,10 +477,10 @@ Three quick recipes:
 - [/core/dependency-injection](/core/dependency-injection) — Autofac vs `Microsoft.Extensions.DependencyInjection`.
 - [/core/dynamic-proxy-and-interceptors](/core/dynamic-proxy-and-interceptors) — Castle.Core in detail.
 - [/data/entity-framework-core](/data/entity-framework-core) — the EF Core 10.0.2 wrappers.
-- [/data/mongodb](/data/mongodb) — MongoDB.Driver 3.7.0.
-- [/infrastructure/event-bus](/infrastructure/event-bus) — Rebus, RabbitMQ, Kafka, Azure Service Bus, Dapr.
-- [/infrastructure/background-jobs-and-workers](/infrastructure/background-jobs-and-workers) — Hangfire, Quartz, TickerQ.
+- [/data/mongodb-integration](/data/mongodb-integration) — MongoDB.Driver 3.7.0.
+- [/infrastructure/event-bus-local](/infrastructure/event-bus-local) — Rebus, RabbitMQ, Kafka, Azure Service Bus, Dapr.
+- [/infrastructure/background-jobs](/infrastructure/background-jobs) — Hangfire, Quartz, TickerQ.
 - [/infrastructure/blob-storing](/infrastructure/blob-storing) — Azure / AWS / Aliyun / Google / Minio / Bunny / FileSystem.
 - [/infrastructure/caching](/infrastructure/caching) — `Microsoft.Extensions.Caching` + StackExchange.Redis.
 - [/angular/overview](/angular/overview) — the `npm/ng-packs/` workspace in depth.
-- [/build-deploy/release-pipeline](/build-deploy/release-pipeline) — publishing both NuGet and npm.
+- [/build-deploy/deploy-scripts](/build-deploy/deploy-scripts) — publishing both NuGet and npm.

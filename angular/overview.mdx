@@ -1,7 +1,7 @@
 ---
-title: "Angular UI Packages Overview and Architecture Map"
+title: "Angular UI Packages — Overview and Architecture Map"
 sidebarTitle: "Overview"
-description: "Tour of the 15 @abp/ng.* Angular packages under npm/ng-packs that ship the ABP Framework single-page application UI stack."
+description: "Tour of the 15 @abp/ng.* Angular packages under npm/ng-packs that ship the ABP Framework single-page application UI stack and admin shell."
 ---
 
 The Angular workspace under `npm/ng-packs/` is the canonical home for the **ABP Framework** browser UI. It is an [Nx](https://nx.dev) monorepo (`nx.json` declares `workspaceLayout.libsDir = "packages"`) where each library compiles independently with [ng-packagr](https://github.com/ng-packagr/ng-packagr) and ships to npm under the `@abp/ng.*` scope. This page maps every published package, shows how they depend on one another, and points at the entry-point files (`package.json`, `public-api.ts`, module classes, `provideAbp*` factories) that anchor the rest of this Angular wiki. Use it as your jumping-off point before diving into [core](/angular/core-package), [components](/angular/components), [theme-shared](/angular/theme-shared), [theme-basic](/angular/theme-basic), [oauth](/angular/oauth), [account](/angular/account-and-account-core), and [identity](/angular/identity).
@@ -108,7 +108,7 @@ Every node except `@abp/ng.core` and `@abp/ng.theme.lepton-x` (an external paid 
 
 Every library folder follows the same skeleton — illustrated here with `packages/core`:
 
-```
+```text
 packages/core/
 ├── package.json          # npm metadata (name, version, peer deps)
 ├── ng-package.json       # ng-packagr entry: lib settings, secondary entry points

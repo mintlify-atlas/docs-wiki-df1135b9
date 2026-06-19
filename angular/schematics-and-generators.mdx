@@ -1,5 +1,5 @@
 ---
-title: "Schematics & Generators — ng add, proxy CLI, and Nx tooling"
+title: "Schematics & Generators — ng add, proxy CLI, Nx tooling"
 sidebarTitle: "Schematics & Generators"
 description: "@abp/ng.schematics collection and @abp/nx.generators package: proxy CLI, library scaffolds, theme switcher, SSR add, AI rules, version updater."
 ---
@@ -467,7 +467,7 @@ flowchart LR
   NCT -->|wrapAngularDevkitSchematic| CT
   SSR -->|schedule schematic| SRV
   CT --> AngularJson[angular.json + app.config.ts]
-  CL --> Workspace[packages/<name>/]
+  CL --> Workspace["packages/&lt;name&gt;/"]
   AI --> Rules[.claude/CLAUDE.md, .cursor/rules/…]
 ```
 

@@ -1,14 +1,14 @@
 ---
 title: "RabbitMQ Job Provider: Per-Type Queues with Delay TTL"
 sidebarTitle: "RabbitMQ Jobs"
-description: "RabbitMqBackgroundJobManager publishes to one queue per args type; delays use a dead-lettered delayed queue with x-message-ttl in Volo.Abp.BackgroundJobs.RabbitMQ."
+description: "RabbitMqBackgroundJobManager publishes to one queue per args type; delays use a dead-lettered delayed queue with x-message-ttl for scheduled jobs."
 ---
 
 `Volo.Abp.BackgroundJobs.RabbitMQ` is the **RabbitMQ adapter** for ABP's `IBackgroundJobManager`. Unlike Hangfire or Quartz, this provider does not need a separate scheduler — each job args type gets its own AMQP queue, the producer publishes directly, and a per‑queue consumer drains it. Delays are implemented with a second queue that uses `x-message-ttl` and dead‑letter routing to forward expired messages onto the main queue. This page covers `RabbitMqBackgroundJobManager`, `IJobQueueManager`, `JobQueue<TArgs>`, `JobQueueConfiguration`, and the queue declaration / consume code.
 
 ## Files
 
-```
+```text
 framework/src/Volo.Abp.BackgroundJobs.RabbitMQ/Volo/Abp/BackgroundJobs/RabbitMQ/
   AbpBackgroundJobsRabbitMqModule.cs
   AbpRabbitMqBackgroundJobOptions.cs

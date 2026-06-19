@@ -1,7 +1,7 @@
 ---
-title: "Angular SPA Companion Template for ABP Solutions"
+title: "Angular SPA Companion Template for the App Template"
 sidebarTitle: "App (Angular)"
-description: "Walkthrough of templates/app/angular/ — standalone Angular SPA with provideAbpCore, provideAbpOAuth, route lazy-loading, and environment-driven endpoints."
+description: "Walkthrough of templates/app/angular/ — standalone Angular SPA with provideAbpCore, provideAbpOAuth, lazy routes, and environment-driven endpoints."
 ---
 
 The Angular SPA shipped at `templates/app/angular/` is the front-end half of an ABP Framework Angular solution. It is a standalone-component Angular 21 application wired to consume the `HttpApi.HostWithIds` API host from the layered template, with OAuth implicit-code flow against the embedded OpenIddict server. This page covers its `package.json` dependency set, the `appConfig` providers, the route table, and the two `environment.ts` files that drive base URLs.
@@ -32,7 +32,7 @@ The `templates/app/angular/start.ps1` is a two-line convenience script (`yarn` t
 
 ## `package.json` — the ABP Angular library set
 
-`templates/app/angular/package.json` is the source of truth for which ABP Angular packages a generated app installs. Eight `@abp/ng.*` libraries (account, components, core, identity, oauth, setting-management, tenant-management) and the LeptonX theme libraries make up the ABP surface:
+`templates/app/angular/package.json` is the source of truth for which ABP Angular packages a generated app installs. Nine `@abp/ng.*` runtime libraries (account, components, core, identity, oauth, setting-management, tenant-management, theme.lepton-x, theme.shared) plus `@abp/ng.schematics` as a dev dependency make up the ABP surface:
 
 ```json templates/app/angular/package.json
 {

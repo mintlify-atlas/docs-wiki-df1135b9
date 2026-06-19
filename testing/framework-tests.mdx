@@ -145,7 +145,7 @@ This generic-suite pattern is the most efficient way to test a provider abstract
 
 ## Cluster: EF Core, MongoDB, MemoryDb, Dapper
 
-These projects share the embedded `Volo.Abp.TestApp` domain (Person, Phone, City, Product, Author, Book, Blog, …) and exercise it through each persistence stack. The reusable helper is `TestAppTestBase<TStartupModule> : AbpIntegratedTest<TStartupModule>` at `framework/test/Volo.Abp.TestApp/Volo/Abp/TestApp/Testing/TestAppTestBase.cs`, which adds:
+These projects share the embedded `Volo.Abp.TestApp` domain (Person, Phone, City, District, EntityWithIntPk, TestSharedTypeEntity, …) and exercise it through each persistence stack. The reusable helper is `TestAppTestBase<TStartupModule> : AbpIntegratedTest<TStartupModule>` at `framework/test/Volo.Abp.TestApp/Volo/Abp/TestApp/Testing/TestAppTestBase.cs`, which adds:
 
 - `WithUnitOfWorkAsync(Func<Task>)` / `WithUnitOfWorkAsync<TResult>(...)` overloads with and without an `AbpUnitOfWorkOptions` argument — each opens a fresh DI scope, begins a UoW, awaits the action, and calls `uow.CompleteAsync()`.
 - `SetAbpApplicationCreationOptions` defaulting to `options.UseAutofac()`.
@@ -249,7 +249,7 @@ Like BlobStoring, the imaging tests use a shared abstract suite (`Volo.Abp.Imagi
 ## Cluster: shared helpers
 
 - `framework/test/AbpTestBase/` — Shouldly extensions and `ICanLogOnObject`. Reference this project from any test assembly that asserts on DI registrations.
-- `framework/test/Volo.Abp.TestApp/` — the embedded domain (`Person`, `Phone`, `City`, `Product`, `Author`, `Book`, `Blog`, …), `TestAppModule : AbpModule`, `TestAppTestBase<T>`, and the `TestMemoryDistributedCache`. EF Core, MongoDB, MemoryDb, and Auditing all rely on it.
+- `framework/test/Volo.Abp.TestApp/` — the embedded domain (`Person`, `Phone`, `City`, `District`, `EntityWithIntPk`, `TestSharedTypeEntity`, `AppEntityWithNavigations`, …), `TestAppModule : AbpModule`, `TestAppTestBase<T>`, and the `TestMemoryDistributedCache`. EF Core, MongoDB, MemoryDb, and Auditing all rely on it.
 - `framework/test/Volo.Abp.TestApp.Tests/` — sanity tests against the `TestApp` domain itself, ensuring the sample remains valid as ABP evolves.
 - `framework/test/SimpleConsoleDemo/` — a non-xUnit console app used as a smoke harness for the modular host.
 

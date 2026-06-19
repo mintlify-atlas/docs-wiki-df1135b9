@@ -1,7 +1,7 @@
 ---
 title: "Mapperly integration: source-generated zero-allocation maps"
 sidebarTitle: "Mapperly Integration"
-description: "Replace runtime reflection with Mapperly source-generated mappers in ABP through MapperBase, IAbpMapperlyMapper, conventional registration and reverse maps."
+description: "Replace runtime reflection with Mapperly source-generated mappers in ABP via MapperBase, IAbpMapperlyMapper, conventional registration and reverse maps."
 ---
 
 `Volo.Abp.Mapperly` plugs the source-generator-driven [Mapperly](https://mapperly.riok.app/) library into ABP's `IObjectMapper` abstraction. Instead of inferring maps at runtime like AutoMapper, Mapperly emits straight C# code at compile time — no reflection, no allocations per call, and AOT-safe. This page covers `IAbpMapperlyMapper<,>`, `MapperBase<TSource,TDestination>`, the reverse-mapper variants, conventional registration through `AbpMapperlyConventionalRegistrar`, the `MapExtraPropertiesAttribute`, and how `MapperlyAutoObjectMappingProvider` slots into ABP's existing `IAutoObjectMappingProvider` plug point.
@@ -301,5 +301,5 @@ Both modules can coexist; just pick which one wins via `AddAutoMapperObjectMappe
 - [/infrastructure/overview](/infrastructure/overview)
 - [/infrastructure/object-mapping](/infrastructure/object-mapping) — abstraction this module plugs into.
 - [/infrastructure/automapper-integration](/infrastructure/automapper-integration) — sibling provider.
-- [/data/object-extensions](/data/object-extensions) — `ExtraProperties` that `MapExtraPropertiesAttribute` copies.
+- [/ddd/object-extending](/ddd/object-extending) — `ExtraProperties` that `MapExtraPropertiesAttribute` copies.
 - [/core/dependency-injection](/core/dependency-injection) — how `AbpMapperlyConventionalRegistrar` exposes services.

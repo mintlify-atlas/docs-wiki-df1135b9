@@ -156,7 +156,7 @@ public abstract class ApplicationService : IAvoidDuplicateCrossCuttingConcerns
 The list lives for the instance's lifetime; concerns come and go but the list is never re-allocated.
 
 <Note>
-  The list is `List<string>` — not a `HashSet<string>`. That's a deliberate choice: a concern may be applied multiple times legitimately (nested scopes that re-enter the same code path) and need to be removed exactly the same number of times. `RemoveAll(c => c == concern)` only nukes one application at a time via `RemoveApplied` because each call removes every match — so interceptors must be careful to use `Applying` (scoped) rather than `Add`/`Remove` pairs.
+  The list is `List<string>` — not a `HashSet<string>`. That lets `GetApplieds(obj)` return the names in the order they were added (useful for diagnostics) and lets a single `Applying(obj, concernA, concernB)` call add multiple entries that are removed together on dispose. Note that `RemoveApplied` calls `RemoveAll(c => c == concern)` — every matching entry is removed at once, so do not interleave manual `AddApplied`/`RemoveApplied` pairs with `Applying` scopes for the same concern.
 </Note>
 
 ## Aspects vs interceptors: the boundary

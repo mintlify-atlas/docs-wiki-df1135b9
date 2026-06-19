@@ -1,7 +1,7 @@
 ---
-title: "AutoMapper integration: profiles, validation and IMapperAccessor"
+title: "AutoMapper integration: profiles, validation, accessor"
 sidebarTitle: "AutoMapper Integration"
-description: "Plug AutoMapper into ABP via AbpAutoMapperOptions, AbpAutoMapperConfigurationContext, AutoMapperAutoObjectMappingProvider and per-module IObjectMapper context."
+description: "Plug AutoMapper into ABP via AbpAutoMapperOptions, AbpAutoMapperConfigurationContext and the AutoMapperAutoObjectMappingProvider used by IObjectMapper."
 ---
 
 `Volo.Abp.AutoMapper` plugs the [AutoMapper](https://automapper.org/) library into ABP's `IObjectMapper` abstraction so application code keeps using `_mapper.Map<TSource, TDest>(source)` while profiles, value resolvers and type converters compose normally. This page covers `AbpAutoMapperOptions`, the `IAbpAutoMapperConfigurationContext`, profile registration and validation, the singleton `IConfigurationProvider` build, `IMapperAccessor`, and the per-context `IObjectMapper<TContext>` registration used by ABP modules to isolate their profiles.
@@ -301,5 +301,5 @@ sequenceDiagram
 - [/infrastructure/overview](/infrastructure/overview)
 - [/infrastructure/object-mapping](/infrastructure/object-mapping) — abstraction this module plugs into.
 - [/infrastructure/mapperly-integration](/infrastructure/mapperly-integration) — alternative auto provider.
-- [/data/object-extensions](/data/object-extensions) — `AbpObjectExtendingModule` (a dependency) wires extra-property mapping after AutoMapper passes.
+- [/ddd/object-extending](/ddd/object-extending) — `AbpObjectExtendingModule` (a dependency) wires extra-property mapping after AutoMapper passes.
 - [/ddd/application-services](/ddd/application-services) — `ApplicationService.ObjectMapper` consumer.

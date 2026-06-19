@@ -10,7 +10,7 @@ description: "IDistributedCache<T> wraps MS.Extensions caching with tenant-aware
 
 Everything in this page is under `framework/src/Volo.Abp.Caching/Volo/Abp/Caching/`:
 
-```
+```text
 AbpCachingModule.cs
 AbpDistributedCacheOptions.cs
 CacheNameAttribute.cs
@@ -176,7 +176,7 @@ public virtual string NormalizeKey(DistributedCacheKeyNormalizeArgs args)
 
 A cached `Acme.Books.BookCacheItem` keyed by `42` for tenant `b6b…` becomes:
 
-```
+```text
 t:b6b…,c:Acme.Books.Book,k:42
 ```
 

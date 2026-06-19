@@ -12,7 +12,7 @@ This page walks through the four entities involved (`AuditLog` aggregate with th
 
 The module is unusually small — there is no application service or HTTP API, because reading audit logs is typically handled by host-specific admin tooling (the commercial ABP modules ship an admin UI; the open-source module just persists). The five projects are:
 
-```
+```text
 modules/audit-logging/src/
 ├── Volo.Abp.AuditLogging.Domain.Shared/      Consts, enums, AbpAuditLoggingDbProperties
 ├── Volo.Abp.AuditLogging.Domain/             Aggregates, AuditingStore, AuditLogInfoToAuditLogConverter

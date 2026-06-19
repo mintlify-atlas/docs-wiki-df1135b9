@@ -1,7 +1,7 @@
 ---
-title: "Dynamic HTTP Client Proxy: Interface Call to Remote Round-Trip"
+title: "Dynamic HTTP Client Proxy: Interface Call to Round-Trip"
 sidebarTitle: "HTTP Client Proxy"
-description: "Trace ABP Framework dynamic HTTP proxy from caller interface invocation through interceptor, configuration, client authentication, and remote MVC round-trip."
+description: "Trace ABP Framework dynamic HTTP proxy from caller interface call through interceptor, configuration provider, authenticator, and the remote round-trip."
 ---
 
 This page traces a single dynamic HTTP-client-proxy call in the **ABP Framework** end-to-end: a caller invokes an application-service interface (say `IIdentityUserAppService`), Castle DynamicProxy routes the call into `DynamicHttpProxyInterceptor<TService>`, which discovers the API contract, builds a `HttpRequestMessage`, attaches headers (tenant, correlation, culture), authenticates via `IRemoteServiceHttpClientAuthenticator`, dispatches through the named `HttpClient`, and finally translates the response back into a strongly-typed return value or wrapped `AbpRemoteCallException`.

@@ -402,7 +402,7 @@ protected virtual ApplicationMenu MergeMenus(List<ApplicationMenu> menus)
 }
 ```
 
-### Batched permission checks
+## Batched permission checks
 
 `CheckPermissionsAsync` is the performance-critical part — it collects every item that has a `StateCheckers` and runs them as a batch, then removes the ones that fail:
 

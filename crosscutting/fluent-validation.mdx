@@ -1,7 +1,7 @@
 ---
-title: "FluentValidation Integration"
+title: "FluentValidation Module and Conventional Registrar Wiring"
 sidebarTitle: "Fluent Validation"
-description: "How AbpFluentValidationModule discovers IValidator<T> implementations and plugs them into the ABP validation pipeline through FluentObjectValidationContributor."
+description: "How AbpFluentValidationModule discovers IValidator<T> classes and plugs them into the ABP validation pipeline via FluentObjectValidationContributor."
 ---
 
 The ABP Framework integrates the popular [FluentValidation](https://docs.fluentvalidation.net/) library by introducing an `IObjectValidationContributor` that resolves an `IValidator<T>` from the container for the runtime type being validated. This page walks through the `Volo.Abp.FluentValidation` package — its module, the conventional registrar that auto-registers FluentValidation validators, and the contributor that bridges FluentValidation's `ValidationResult` back into ABP's `System.ComponentModel.DataAnnotations.ValidationResult` shape.

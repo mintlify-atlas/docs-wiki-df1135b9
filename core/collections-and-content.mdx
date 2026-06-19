@@ -347,6 +347,6 @@ Consumers that don't know about `ImageRemoteStreamContent` treat it as `IRemoteS
 | `NamedTypeSelector` | `NamedTypeSelector.cs` | A predicate paired with a name. |
 | `NamedTypeSelectorListExtensions` | `NamedTypeSelectorListExtensions.cs` | `Remove(name)` helpers. |
 
-The `NamedTypeSelectorList` is what `ServiceRegistrationActionList.DisabledClassInterceptorsSelectors` actually is (an `IClassInterceptorsSelectorList`, see [Dependency injection](/core/dependency-injection)).
+`ClassInterceptorsSelectorList : List<NamedTypeSelector>` (implementing `IClassInterceptorsSelectorList`) is what backs `ServiceRegistrationActionList.DisabledClassInterceptorsSelectors` — see [Dependency injection](/core/dependency-injection).
 
 File storage and blob streaming are documented under [/infrastructure/overview](/infrastructure/overview); upload/download flows in DDD application services live under [/ddd/overview](/ddd/overview); persistence-backed file metadata sits in [/data/overview](/data/overview).

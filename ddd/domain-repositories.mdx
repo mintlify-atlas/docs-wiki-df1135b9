@@ -460,7 +460,7 @@ public static IServiceCollection AddDefaultRepository(
 }
 ```
 
-The fourth boolean argument to `RegisterService` is `replaceForReadOnly` — for the read-only services the registrar can mark the registration as change-tracking-disabled.
+The fifth (`true`) argument to `RegisterService` is `isReadOnlyRepository` — for the read-only services the registrar marks the registration so the resolved instance has `IsChangeTrackingEnabled = false`.
 
 ## Change tracking
 

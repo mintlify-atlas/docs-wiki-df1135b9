@@ -1,7 +1,7 @@
 ---
-title: "StackExchange.Redis Cache Provider for ABP Apps"
+title: "StackExchange.Redis Cache Provider for ABP Applications"
 sidebarTitle: "Redis Caching"
-description: "Volo.Abp.Caching.StackExchangeRedis replaces IDistributedCache with AbpRedisCache, adds bulk operations and a configurable connection from Redis:Configuration."
+description: "Volo.Abp.Caching.StackExchangeRedis swaps IDistributedCache for AbpRedisCache, adds bulk operations and a configurable connection from Redis:Configuration."
 ---
 
 `Volo.Abp.Caching.StackExchangeRedis` is the **ABP Framework's Redis adapter** for the typed `IDistributedCache<T>` stack. It does two things: (1) it registers `AbpRedisCache` — a derivative of `Microsoft.Extensions.Caching.StackExchangeRedis.RedisCache` — that implements `ICacheSupportsMultipleItems` so bulk operations can pipeline; (2) it reads `Redis:IsEnabled` and `Redis:Configuration` from `IConfiguration` to wire `AddStackExchangeRedisCache`. This page covers the module, the cache class, the extension helpers it relies on, and what gets replaced versus reused from the base BCL `RedisCache`.
@@ -10,7 +10,7 @@ description: "Volo.Abp.Caching.StackExchangeRedis replaces IDistributedCache wit
 
 Everything is under `framework/src/Volo.Abp.Caching.StackExchangeRedis/Volo/Abp/Caching/StackExchangeRedis/`:
 
-```
+```text
 AbpCachingStackExchangeRedisModule.cs
 AbpRedisCache.cs
 AbpRedisExtensions.cs
@@ -249,7 +249,7 @@ The typed wrapper still goes through its key normalizer, serializer, and UoW sta
 
 A `Set` on `IDistributedCache<BookCacheItem, Guid>` with key `42` under tenant `b6b…` and `Redis:InstanceName = "Acme:"` produces this wire key:
 
-```
+```text
 Acme:t:b6b…,c:Acme.Books.Book,k:42
 ```
 

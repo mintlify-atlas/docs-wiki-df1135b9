@@ -269,7 +269,7 @@ The codebase splits "test infrastructure" between two locations that are easy to
 | `framework/src/Volo.Abp.TestBase/` | The published runtime library — `AbpIntegratedTest<T>`, `AbpAsyncIntegratedTest<T>`, `AbpTestBaseWithServiceProvider`, `AbpTestBaseModule`, `ITestCounter`/`TestCounter`. | NuGet package consumed by every test. |
 | `framework/src/Volo.Abp.AspNetCore.TestBase/` | Published ASP.NET Core companion — `AbpWebApplicationFactoryIntegratedTest<TProgram>`, `AbpAspNetCoreTestBaseModule`, `ITestServerAccessor`, `AspNetCoreTestProxyHttpClientFactory`. | NuGet package. |
 | `framework/test/AbpTestBase/` | Test-side helpers — `ServiceCollectionShouldlyExtensions`, `ICanLogOnObject`. | Project reference, never published. |
-| `framework/test/Volo.Abp.TestApp/` | Embedded DDD sample (`Person`, `City`, `Phone`, `Product`, `TestAppModule`, `TestAppTestBase<T>`) used by EF Core, Mongo, MemoryDb, Auditing. | Project reference, never published. |
+| `framework/test/Volo.Abp.TestApp/` | Embedded DDD sample (`Person`, `City`, `Phone`, `District`, `TestAppModule`, `TestAppTestBase<T>`, `TestMemoryDistributedCache`) used by EF Core, Mongo, MemoryDb, Auditing. | Project reference, never published. |
 
 When the same name appears under both `src/` and `test/`, the `src/` version is the runtime contract and the `test/` version is the in-repo helper. The two roles never overlap.
 

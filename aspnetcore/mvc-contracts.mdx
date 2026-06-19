@@ -1,7 +1,7 @@
 ---
-title: "Volo.Abp.AspNetCore.Mvc.Contracts: Shared App Configuration DTOs"
+title: "Mvc.Contracts: ApplicationConfigurationDto and Tenant DTOs"
 sidebarTitle: "MVC Contracts"
-description: "Walk Volo.Abp.AspNetCore.Mvc.Contracts: the ApplicationConfigurationDto family, IAbpApplicationConfigurationAppService, IAbpTenantAppService and ObjectExtending DTOs."
+description: "Volo.Abp.AspNetCore.Mvc.Contracts: the ApplicationConfigurationDto tree, IAbpApplicationConfigurationAppService, IAbpTenantAppService and extending DTOs."
 ---
 
 `Volo.Abp.AspNetCore.Mvc.Contracts` is a tiny but pivotal package in the ABP
@@ -262,7 +262,7 @@ public class CurrentCultureDto
 `ClockDto` carries `Kind` (`Utc` / `Local` / `Unspecified`), and `TimingDto`
 carries the current `TimeZone`. UIs use those values to render dates and
 serialize times. The server populates them from the
-[`IClock`](/infrastructure/clock) abstraction documented elsewhere.
+[`IClock`](/infrastructure/timing) abstraction documented elsewhere.
 
 ## Multi-tenancy DTOs
 

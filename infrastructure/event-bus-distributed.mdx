@@ -1,7 +1,7 @@
 ---
-title: "Distributed Event Bus: Outbox, Inbox and ETOs"
+title: "Distributed Event Bus: Outbox, Inbox and ETO Pipeline"
 sidebarTitle: "Distributed Event Bus"
-description: "IDistributedEventBus, DistributedEventBusBase, OutboxConfig/InboxConfig and the LocalDistributedEventBus fallback that ABP uses for transactional event delivery."
+description: "IDistributedEventBus, DistributedEventBusBase, OutboxConfig/InboxConfig and the LocalDistributedEventBus fallback for transactional event delivery."
 ---
 
 `IDistributedEventBus` is the **cross‑process event contract** of the ABP Framework. Compared to the in‑process `ILocalEventBus` it adds two flags — `onUnitOfWorkComplete` and `useOutbox` — and a whole supporting cast of outbox/inbox processors so an event published inside a database transaction is delivered exactly once, even when the broker is temporarily unreachable. This page covers the contract, the `DistributedEventBusBase` template that every provider extends, the `OutboxConfig`/`InboxConfig` registration model, the `LocalDistributedEventBus` fallback, and the ETO conventions used by domain entity events.
@@ -46,7 +46,7 @@ Two flags shape every publish decision:
 
 ## File map
 
-```
+```text
 framework/src/Volo.Abp.EventBus.Abstractions/Volo/Abp/EventBus/Distributed/
   IDistributedEventBus.cs
   IDistributedEventHandler.cs

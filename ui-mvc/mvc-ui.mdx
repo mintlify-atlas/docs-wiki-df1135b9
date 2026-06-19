@@ -1,7 +1,7 @@
 ---
-title: "Volo.Abp.AspNetCore.Mvc.UI — Core Package Tour"
+title: "Volo.Abp.AspNetCore.Mvc.UI — Core Package Deep Dive"
 sidebarTitle: "MVC UI Core"
-description: "Walks the Volo.Abp.AspNetCore.Mvc.UI package — module, theming abstractions, layouts, AbpPageModel, layout hooks, and alerts."
+description: "Walks the Volo.Abp.AspNetCore.Mvc.UI seed package — module, theming abstractions, layouts, AbpPageModel, layout hooks, and AlertManager."
 ---
 
 `Volo.Abp.AspNetCore.Mvc.UI` is the seed package that all other ABP MVC UI assemblies depend on. This page walks the folder layout under `framework/src/Volo.Abp.AspNetCore.Mvc.UI/Volo/Abp/AspNetCore/Mvc/UI/`, takes apart the theme resolution pipeline that decides which `.cshtml` layout an action will render, and inspects the base types — `AbpPage`, `AbpPageModel`, `AlertManager`, `PageLayout` — that every Razor page in an ABP solution inherits.
@@ -105,7 +105,7 @@ Configure<AbpThemingOptions>(options =>
 
 `ThemeDictionary.Add<TTheme>()` constructs a `ThemeInfo` which reads the `[ThemeName]` attribute via the static `ThemeNameAttribute.GetName(themeType)`. See `modules/basic-theme/src/Volo.Abp.AspNetCore.Mvc.UI.Theme.Basic/BasicTheme.cs` for the reference implementation.
 
-### `IThemeSelector` and `IThemeManager`
+## Theme selection and resolution
 
 The selector resolves the theme type once per request based on `AbpThemingOptions.DefaultThemeName`. The default implementation falls back to the first registered theme:
 

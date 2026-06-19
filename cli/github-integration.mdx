@@ -191,7 +191,7 @@ The NuGet version is asked for through a separate `POST` to `api/download/{type}
 
 The download endpoints are open for free templates but gated for commercial ones. `CliHttpClientFactory.CreateClient(needsAuthentication: true)` (the default) calls `httpClient.AddAbpAuthenticationToken()` which reads the OIDC access token from `CliPaths.AccessToken` (`~/.abp/cli/access-token.bin`) and sets it as the bearer header. From the server's perspective a download request is therefore:
 
-```
+```http
 POST https://abp.io/api/download/template/
 Authorization: Bearer <opaque token from access-token.bin>
 {

@@ -137,7 +137,7 @@ internal static void AddCoreAbpServices(this IServiceCollection services,
 
 ## AbpApplicationCreationOptions
 
-`AbpApplicationCreationOptions` in `framework/src/Volo.Abp.Core/Volo/Abp/AbpApplicationCreationOptions.cs` is intentionally tiny — five mutable values:
+`AbpApplicationCreationOptions` in `framework/src/Volo.Abp.Core/Volo/Abp/AbpApplicationCreationOptions.cs` is intentionally tiny — three read-only collections (`Services`, `PlugInSources`, `Configuration`) plus three writable scalars (`SkipConfigureServices`, `ApplicationName`, `Environment`):
 
 ```csharp
 public class AbpApplicationCreationOptions

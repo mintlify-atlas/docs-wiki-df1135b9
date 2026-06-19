@@ -190,7 +190,7 @@ The five gates, in order:
 
 ```mermaid
 flowchart LR
-    A[IsGrantedAsync(name)] --> B{Defined?}
+    A["IsGrantedAsync(name)"] --> B{Defined?}
     B -- no --> X[false]
     B -- yes --> C{IsEnabled?}
     C -- no --> X

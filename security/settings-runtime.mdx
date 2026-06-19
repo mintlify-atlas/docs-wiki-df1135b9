@@ -1,7 +1,7 @@
 ---
 title: "Settings Runtime: ISettingProvider, Definitions, Encryption"
 sidebarTitle: "Settings"
-description: "How Volo.Abp.Settings resolves named settings through a provider chain (User → Global → Configuration → Default) with optional per-setting encryption."
+description: "How Volo.Abp.Settings resolves named settings via a provider chain (User → Global → Configuration → Default) with optional per-setting encryption."
 ---
 
 `Volo.Abp.Settings` in the ABP Framework is the runtime side of named configuration values — anything that an admin might want to tweak without redeploy (SMTP host, default time zone, email-verification-required flag, brand colors). This page covers `AbpSettingsModule` wiring, `SettingDefinition`, the four built-in `ISettingValueProvider`s, encryption via `ISettingEncryptionService`, and the contract pattern the [Setting Management module](/modules/setting-management) builds on top to provide `ISettingManager` (which lives outside the framework package, in the application module).

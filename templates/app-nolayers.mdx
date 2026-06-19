@@ -25,7 +25,7 @@ description: "Single-project ABP Framework startup template at templates/app-nol
 </Solution>
 ```
 
-Ten projects — five UI variants × two databases. The CLI step `AppNoLayersTemplateBase.GetCustomSteps` keeps only one of them.
+Ten projects total — four UI shapes (`Mvc`, `Host` headless, `Blazor.Server`, `Blazor.WebAssembly`) each in EF Core and MongoDB flavours, plus the `Blazor.WebAssembly/Client` and `Blazor.WebAssembly/Shared` companion libraries. The CLI step `AppNoLayersTemplateBase.GetCustomSteps` keeps only the projects matching the chosen `-u` / `-d` combination.
 
 ## The five UI variants
 

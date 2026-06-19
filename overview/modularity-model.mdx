@@ -255,7 +255,7 @@ Because `ModuleManager` loops modules **inside** the contributor loop, *every mo
 
 ### Shutdown
 
-`AbpApplicationBase.ShutdownAsync()` calls `ModuleManager.ShutdownModulesAsync(ApplicationShutdownContext)`. The manager reverses the module list (`_moduleContainer.Modules.Reverse()`) so dependencies tear down before dependents, then runs the single `OnApplicationShutdownModuleLifecycleContributor`.
+`AbpApplicationBase.ShutdownAsync()` calls `ModuleManager.ShutdownModulesAsync(ApplicationShutdownContext)`. The manager reverses the module list (`_moduleContainer.Modules.Reverse()`) so dependencies tear down before dependents, then iterates every configured lifecycle contributor — only `OnApplicationShutdownModuleLifecycleContributor.ShutdownAsync` does meaningful work; the other three inherit a no-op `ShutdownAsync` from `ModuleLifecycleContributorBase`.
 
 ## Full lifecycle summary
 
@@ -336,7 +336,7 @@ public class MyAppDomainModule : AbpModule { ... }
 
 Then `SortByDependency` produces a flat list where each module appears after its dependencies; finally `MoveItem` shoves `MyAppHostModule` to the last slot. So the resulting `IAbpModuleDescriptor[]` order is:
 
-```
+```text
 [AbpCoreModule (transitive root), …, AbpDddDomainModule, AbpEntityFrameworkCoreModule,
  MyAppDomainModule, AbpDddApplicationModule, MyAppApplicationModule,
  AbpAutofacModule, AbpAspNetCoreMvcModule, …, MyAppHostModule]

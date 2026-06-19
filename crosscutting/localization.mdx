@@ -1,7 +1,7 @@
 ---
-title: "Localization Resources"
+title: "Localization Resources, Contributors and Localizer Factory"
 sidebarTitle: "Localization"
-description: "How ABP defines localization resources, loads them via virtual-file contributors, exposes them as IStringLocalizer, and pulls dynamic strings from an external store."
+description: "How ABP defines localization resources, loads them via virtual-file contributors, exposes them as IStringLocalizer and reads from external stores."
 ---
 
 The ABP Framework builds on top of `Microsoft.Extensions.Localization` but replaces `IStringLocalizerFactory` with a richer model that supports resource inheritance, virtual-file contributors, dynamic external stores and per-resource culture fallback. This page walks through the `Volo.Abp.Localization` and `Volo.Abp.Localization.Abstractions` packages — how a `LocalizationResource` is declared with `[LocalizationResourceName]`, how `AbpStringLocalizerFactory` caches contributors, how `AbpLocalizationOptions` controls everything, and how `IExternalLocalizationStore` plugs in run-time resources.

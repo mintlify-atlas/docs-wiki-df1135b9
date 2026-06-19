@@ -1,5 +1,5 @@
 ---
-title: "HTTP Request Lifecycle: Middlewares, Filters, and Controllers"
+title: "HTTP Request Lifecycle: Middlewares, Filters, Controllers"
 sidebarTitle: "HTTP Request"
 description: "Trace ABP Framework HTTP requests through Serilog, exception handling, multi-tenancy, auth, UoW middleware, MVC action filters, and the controller."
 ---
@@ -38,11 +38,13 @@ sequenceDiagram
     Auth->>Uow: next(context)
     Uow->>Uow: _unitOfWorkManager.Reserve(...)
     Uow->>Mvc: next(context)
-    Mvc->>Filters: AbpValidationActionFilter
-    Filters->>Filters: AbpUowActionFilter (TryBeginReserved)
-    Filters->>Filters: AbpFeatureActionFilter
+    Mvc->>Filters: GlobalFeatureActionFilter
     Filters->>Filters: AbpAuditActionFilter
-    Filters->>Filters: AbpGlobalFeatureActionFilter
+    Filters->>Filters: AbpNoContentActionFilter
+    Filters->>Filters: AbpFeatureActionFilter
+    Filters->>Filters: AbpValidationActionFilter
+    Filters->>Filters: AbpUowActionFilter (TryBeginReserved)
+    Filters->>Filters: AbpExceptionFilter
     Filters->>Ctrl: ActionExecutingContext
     Ctrl-->>Filters: ActionExecutedContext
     Filters->>Filters: uow.CompleteAsync() (success) / RollbackAsync()
@@ -117,7 +119,7 @@ The middleware only **wraps** exceptions for endpoints that produced a JSON `IAc
 
 ## 4. Correlation ID + request culture
 
-`AbpCorrelationIdMiddleware` (under `Volo.Abp.AspNetCore/Volo/Abp/AspNetCore/Tracing/`) reads/issues the configured correlation header and stamps `ICorrelationIdProvider`. `AbpRequestLocalizationMiddleware` (under `Volo.Abp.AspNetCore/Volo/Abp/AspNetCore/Localization/`) is a thin override of ASP.NET's `RequestLocalizationMiddleware` that respects ABP `LanguageInfo` settings.
+`AbpCorrelationIdMiddleware` (under `Volo.Abp.AspNetCore/Volo/Abp/AspNetCore/Tracing/`) reads/issues the configured correlation header and stamps `ICorrelationIdProvider`. `AbpRequestLocalizationMiddleware` (under `Volo.Abp.AspNetCore/Microsoft/AspNetCore/RequestLocalization/`) is a thin override of ASP.NET's `RequestLocalizationMiddleware` that respects ABP `LanguageInfo` settings.
 
 These two middlewares are pure pass-throughs in the happy path; they only mutate `HttpContext.Items` and headers.
 
@@ -183,16 +185,19 @@ Two important details:
 
 `app.UseConfiguredEndpoints()` calls `endpoints.MapControllers()`, `MapHubs()`, `MapHealthChecks()` etc. — see `Volo.Abp.AspNetCore.Mvc/Microsoft/AspNetCore/Builder/AbpEndpointRouteBuilderExtensions.cs`. From here ASP.NET's `EndpointMiddleware` dispatches to the `ControllerActionInvoker`, which runs the MVC filter pipeline in the order described in §9 below.
 
-The filter ordering is set by `AbpAspNetCoreMvcModule.ConfigureServices`, which calls `MvcOptions.AddAbpFilters()`:
+The filter ordering is set in `framework/src/Volo.Abp.AspNetCore.Mvc/Volo/Abp/AspNetCore/Mvc/AbpMvcOptionsExtensions.cs`, in the private `AddActionFilters` helper called from `AddAbp(MvcOptions)`:
 
 ```csharp
-options.Filters.AddService(typeof(AbpAuditActionFilter));
-options.Filters.AddService(typeof(AbpFeatureActionFilter));
-options.Filters.AddService(typeof(AbpValidationActionFilter));
-options.Filters.AddService(typeof(AbpUowActionFilter));
-options.Filters.AddService(typeof(AbpExceptionFilter));
-options.Filters.AddService(typeof(AbpNoContentActionFilter));
-options.Filters.AddService(typeof(GlobalFeatureActionFilter));
+private static void AddActionFilters(MvcOptions options)
+{
+    options.Filters.AddService(typeof(GlobalFeatureActionFilter));
+    options.Filters.AddService(typeof(AbpAuditActionFilter));
+    options.Filters.AddService(typeof(AbpNoContentActionFilter));
+    options.Filters.AddService(typeof(AbpFeatureActionFilter));
+    options.Filters.AddService(typeof(AbpValidationActionFilter));
+    options.Filters.AddService(typeof(AbpUowActionFilter));
+    options.Filters.AddService(typeof(AbpExceptionFilter));
+}
 ```
 
 ## 9. ABP MVC action filters in detail

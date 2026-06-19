@@ -1,7 +1,7 @@
 ---
-title: "Specifications"
+title: "ISpecification, Combinators and Expression Rebinding Tricks"
 sidebarTitle: "Specifications"
-description: "ABP's implementation of the specification pattern: ISpecification<T>, expression-based composition, and the combinator primitives in Volo.Abp.Specifications."
+description: "ABP's implementation of the specification pattern: ISpecification<T>, expression composition and the combinator primitives in Volo.Abp.Specifications."
 ---
 
 The ABP Framework provides a small but complete implementation of the *specification pattern* in the `Volo.Abp.Specifications` package. Specifications encapsulate predicate logic so it can be stored, named, composed and — crucially — translated into `Expression<Func<T, bool>>` trees that LINQ providers such as Entity Framework Core can convert into SQL. This page walks through every type in the package, the combinator helpers, and the expression-rebinding trick that lets two arbitrary expressions be `AND`/`OR`-combined safely.
@@ -345,16 +345,16 @@ A `RestrictedToPremiumTenantsSpecification` can be combined with another specifi
 
 ## Specification parsing
 
-`ISpecificationParser.cs` declares an optional contract for code that needs to deserialize a specification from text (e.g. a saved filter from the database):
+`ISpecificationParser.cs` declares an optional contract for code that needs to translate an `ISpecification<T>` into a backend-specific criteria object — for example, an NHibernate `ICriteria` instance or a Mongo `FilterDefinition`:
 
 ```csharp
-public interface ISpecificationParser
+public interface ISpecificationParser<out TCriteria>
 {
-    // implementation-defined
+    TCriteria Parse<T>(ISpecification<T> specification);
 }
 ```
 
-The package itself does not ship a default parser — the interface exists so that downstream modules can plug a domain-specific language (such as a JSON tree or an OData expression) into the same pipeline.
+The package itself does not ship a default parser — `TCriteria` is left to the consuming module to define, so a downstream Mongo or NHibernate integration can plug its own native criteria type into the same pipeline without forcing every caller to depend on it.
 
 ## See also
 

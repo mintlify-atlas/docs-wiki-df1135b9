@@ -97,7 +97,7 @@ The repo is organised by *role* rather than by feature. Most C# code lives under
 | `test/` | Cross-cutting perf and distributed-event integration tests | [Framework tests](/testing/framework-tests) |
 | `nupkg/` | Auxiliary NuGet outputs | [NuGet packaging](/build-deploy/nuget-packaging) |
 | `lowcode/` | JSON schema for ABP Suite low-code generation | [Tech stack](/overview/tech-stack-and-dependencies) |
-| `abp_io/` | Source for the abp.io marketing site (not part of the framework) | n/a |
+| `abp_io/` | `AbpIoLocalization.slnx` plus translation resources used by the abp.io website (not part of the framework) | n/a |
 | `Directory.Build.props`, `Directory.Packages.props`, `common.props`, `common.test.props` | Central MSBuild + NuGet central-package-management | [Directory.Build & Packages](/build-deploy/directory-build-and-packages) |
 
 ## Subsystem map
@@ -175,7 +175,7 @@ Key entry points to open first when navigating the code:
 
 - **Bootstrap** — `framework/src/Volo.Abp.Core/Volo/Abp/AbpApplicationBase.cs` and `framework/src/Volo.Abp.Core/Volo/Abp/AbpApplicationFactory.cs`. Documented on [AbpApplication and bootstrap](/core/abp-application-and-bootstrap).
 - **Module system** — `framework/src/Volo.Abp.Core/Volo/Abp/Modularity/AbpModule.cs`, `IAbpModule.cs`, `DependsOnAttribute.cs`. Documented on [Modularity and modules](/core/modularity-and-modules).
-- **DDD root contracts** — `framework/src/Volo.Abp.Ddd.Domain/Volo/Abp/Domain/Entities/Entity.cs` and `IRepository.cs`. Documented on [Entities and aggregates](/ddd/domain-entities-and-aggregates) and [Repositories](/ddd/domain-repositories).
+- **DDD root contracts** — `framework/src/Volo.Abp.Ddd.Domain/Volo/Abp/Domain/Entities/Entity.cs` and `framework/src/Volo.Abp.Ddd.Domain/Volo/Abp/Domain/Repositories/IRepository.cs`. Documented on [Entities and aggregates](/ddd/domain-entities-and-aggregates) and [Repositories](/ddd/domain-repositories).
 - **CLI** — `framework/src/Volo.Abp.Cli/Volo/Abp/Cli/Program.cs` and `AbpCliModule.cs`. Commands live in `framework/src/Volo.Abp.Cli.Core/Volo/Abp/Cli/Commands/`. Documented on [CLI overview](/cli/overview).
 - **EF Core integration** — `framework/src/Volo.Abp.EntityFrameworkCore/Volo/Abp/EntityFrameworkCore/AbpDbContext.cs` and the per-provider packages. Documented on [Entity Framework Core](/data/entity-framework-core).
 - **Application module reference** — `modules/identity/src/Volo.Abp.Identity.Domain/Volo/Abp/Identity/IdentityUser.cs` is a canonical example aggregate root. Documented on [Identity module](/modules/identity).

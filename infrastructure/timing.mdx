@@ -241,7 +241,7 @@ public class FakeClock : IClock
 services.Replace(ServiceDescriptor.Transient<IClock, FakeClock>());
 ```
 
-ABP's own [testing infrastructure](/testing/test-base) registers a similar deterministic clock so audited timestamps are reproducible.
+ABP's own [testing infrastructure](/testing/testbase) registers a similar deterministic clock so audited timestamps are reproducible.
 
 ## Cheat sheet
 
@@ -257,6 +257,6 @@ ABP's own [testing infrastructure](/testing/test-base) registers a similar deter
 ## See also
 
 - [/infrastructure/overview](/infrastructure/overview)
-- [/data/auditing](/data/auditing) — `CreationTime`, `LastModificationTime` flow through `IClock`.
+- [/infrastructure/auditing](/infrastructure/auditing) — `CreationTime`, `LastModificationTime` flow through `IClock`.
 - [/core/options-and-configuration](/core/options-and-configuration) — where `AbpClockOptions` is registered.
-- [/multi-tenancy/settings](/multi-tenancy/settings) — per-tenant timezone settings can drive `ICurrentTimezoneProvider`.
+- [/multi-tenancy/tenant-configuration-store](/multi-tenancy/tenant-configuration-store) — per-tenant timezone settings can drive `ICurrentTimezoneProvider`.

@@ -1,7 +1,7 @@
 ---
 title: "IdentityModel Token Client: OIDC Bearer for Services"
 sidebarTitle: "Identity Model"
-description: "Inside Volo.Abp.IdentityModel — how IdentityModelAuthenticationService caches OIDC discovery and access tokens to authenticate service-to-service HTTP clients."
+description: "Inside Volo.Abp.IdentityModel — how IdentityModelAuthenticationService caches OIDC discovery and access tokens for service-to-service HTTP clients."
 ---
 
 `Volo.Abp.IdentityModel` in the ABP Framework is the service-to-service OIDC client. When one ABP service has to call another (microservice mesh, BFF talking to a downstream API, background worker calling an internal endpoint), it needs an access token that the downstream service's JWT Bearer middleware will accept. This package wraps `Duende.IdentityModel.Client` with caching for discovery documents and tokens, multi-tenancy-aware client configuration, and `client_credentials` / `password` / `device_code` grant support. This page covers `IIdentityModelAuthenticationService`, `IdentityClientConfiguration`, the cache items, and how the client gets resolved per current tenant.

@@ -51,7 +51,7 @@ graph TD
 
 The Razor counterpart lives at `modules/basic-theme/src/Volo.Abp.AspNetCore.Mvc.UI.Theme.Basic/`:
 
-```
+```text
 Volo.Abp.AspNetCore.Mvc.UI.Theme.Basic/
 ├── AbpAspNetCoreMvcUIBasicThemeModule.cs
 ├── BasicTheme.cs                                ← ITheme implementation
@@ -186,7 +186,7 @@ $(function () {
 });
 ```
 
-That's it — eighteen lines that turn nested `<ul class="dropdown-menu">` markup into Bootstrap multi-level dropdowns. Bootstrap 5 doesn't ship native nested dropdowns, so this fragment bridges the gap. The logic:
+That's it — seventeen lines that turn nested `<ul class="dropdown-menu">` markup into Bootstrap multi-level dropdowns. Bootstrap 5 doesn't ship native nested dropdowns, so this fragment bridges the gap. The logic:
 
 1. Click on `a.dropdown-toggle` inside a `.dropdown-menu` cancels the default link behaviour (`return false`).
 2. The clicked link's next sibling (`<ul class="dropdown-menu">`) gets `.show` toggled.
@@ -228,7 +228,7 @@ These are exposed as `[ViewComponent]`s so other modules can swap their implemen
 
 The Blazor Server side lives at `modules/basic-theme/src/Volo.Abp.AspNetCore.Components.Server.BasicTheme/`:
 
-```
+```text
 Volo.Abp.AspNetCore.Components.Server.BasicTheme/
 ├── AbpAspNetCoreComponentsServerBasicThemeModule.cs
 ├── BasicThemeToolbarContributor.cs
@@ -334,7 +334,7 @@ The same pattern applies to the script bundle. Because every per-theme bundle in
 | --- | --- | --- |
 | Layer below | `aspnetcore.mvc.ui.theme.shared` | `aspnetcore.components.server.theming` |
 | Vendor surface | Bootstrap 5 + 13 plug-ins via shared | Bootstrap 5 + Font Awesome only |
-| JS files | `layout.js` (18 lines) + shared bundle | None of its own; theming pack ships `abp.js` |
+| JS files | `layout.js` (17 lines) + shared bundle | None of its own; theming pack ships `abp.js` |
 | CSS files | `googlefonts.css`, `layout.css` | `theme.css` from RCL `_content/` |
 | Layouts | `Application.cshtml`, `Account.cshtml`, `Empty.cshtml` | `MainLayout.razor` (from `Components.Web.BasicTheme`) |
 | Bundle names | `BasicThemeBundles.Scripts.Global` / `Styles.Global` | `BlazorBasicThemeBundles.Scripts.Global` / `Styles.Global` |

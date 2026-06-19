@@ -1,14 +1,14 @@
 ---
-title: "Azure Service Bus Event Bus Provider for ABP"
+title: "Azure Service Bus Event Bus Provider for ABP Framework"
 sidebarTitle: "Azure Service Bus"
-description: "AzureDistributedEventBus uses a topic + subscription per service, Service Bus message Subject/MessageId/CorrelationId, and a PublisherPool for batched sends."
+description: "AzureDistributedEventBus uses a topic plus subscription per service, Service Bus Subject/MessageId/CorrelationId and a PublisherPool for batched sends."
 ---
 
 `Volo.Abp.EventBus.Azure` adapts ABP's `IDistributedEventBus` to **Azure Service Bus**. It uses a single topic for every event, a per‑service subscription, and rides the Service Bus `Subject` slot as the event name. This page walks `AzureDistributedEventBus`, its options, how it pools publishers, and the way `IsServiceBusDisabled` is used to short‑circuit module initialization in offline tests.
 
 ## Files
 
-```
+```text
 framework/src/Volo.Abp.EventBus.Azure/Volo/Abp/EventBus/Azure/
   AbpAzureEventBusOptions.cs
   AbpEventBusAzureModule.cs

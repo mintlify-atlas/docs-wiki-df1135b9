@@ -6,7 +6,7 @@ description: "How ABP's MSBuild props, .slnx solutions, .abpsln Studio files and
 
 The ABP Framework's build system is a few small `.props` files and a handful of short PowerShell scripts — but it is what holds 169 NuGet packages, 19 application modules, eight startup templates and a NuGet/MyGet release pipeline together. This page walks the root `Directory.Build.props`, `Directory.Packages.props`, `common.props`, `common.test.props` and `configureawait.props` line by line, then the `.slnx` / `.abpsln` / `.abpmdl` triplet, how `global.json` pins the .NET SDK, and finally `build/common.ps1` plus `build-all.ps1`, `build-all-release.ps1` and `test-all.ps1`.
 
-For the *what* of each folder, see [/overview/repository-layout](/overview/repository-layout); for the dependency catalog those props control, see [/overview/tech-stack-and-dependencies](/overview/tech-stack-and-dependencies). The CI artifacts produced by these scripts are then pushed by the numbered `deploy/` scripts described in [/build-deploy/release-pipeline](/build-deploy/release-pipeline).
+For the *what* of each folder, see [/overview/repository-layout](/overview/repository-layout); for the dependency catalog those props control, see [/overview/tech-stack-and-dependencies](/overview/tech-stack-and-dependencies). The CI artifacts produced by these scripts are then pushed by the numbered `deploy/` scripts described in [/build-deploy/deploy-scripts](/build-deploy/deploy-scripts).
 
 ## The .NET SDK — `global.json`
 
@@ -452,7 +452,7 @@ flowchart TD
     in `framework/src/*/bin/Debug/net10.0/`.
   </Step>
   <Step title="Build everything (dev)">
-    ```
+    ```powershell
     cd build
     pwsh ./build-all.ps1
     ```
@@ -460,7 +460,7 @@ flowchart TD
     the first failure.
   </Step>
   <Step title="Build everything (release)">
-    ```
+    ```powershell
     cd build
     pwsh ./build-all-release.ps1
     ```
@@ -468,7 +468,7 @@ flowchart TD
     and uses `/maxcpucount`.
   </Step>
   <Step title="Test everything">
-    ```
+    ```powershell
     cd build
     pwsh ./test-all.ps1 -f
     ```
@@ -479,7 +479,7 @@ flowchart TD
     `nupkg/pack.ps1` packs every csproj into `nupkg/0/`, then
     `nupkg/push_packages.ps1` pushes them to nuget.org. The numbered scripts
     under `deploy/` orchestrate the full release — see
-    [/build-deploy/release-pipeline](/build-deploy/release-pipeline).
+    [/build-deploy/deploy-scripts](/build-deploy/deploy-scripts).
   </Step>
 </Steps>
 
@@ -545,7 +545,7 @@ All four PowerShell scripts then run unchanged because they don't bake the versi
 - [/overview/tech-stack-and-dependencies](/overview/tech-stack-and-dependencies) — every `PackageVersion` in `Directory.Packages.props`.
 - [/overview/modularity-model](/overview/modularity-model) — what those compiled assemblies do at runtime.
 - [/core/abp-application-and-bootstrap](/core/abp-application-and-bootstrap) — the runtime entry point that consumes the built binaries.
-- [/build-deploy/build-system](/build-deploy/build-system) — deeper coverage of MSBuild plumbing across CI.
-- [/build-deploy/release-pipeline](/build-deploy/release-pipeline) — the eight numbered scripts in `deploy/` that publish what these scripts build.
+- [/build-deploy/build-scripts](/build-deploy/build-scripts) — deeper coverage of MSBuild plumbing across CI.
+- [/build-deploy/deploy-scripts](/build-deploy/deploy-scripts) — the eight numbered scripts in `deploy/` that publish what these scripts build.
 - [/cli/overview](/cli/overview) — the ABP CLI shipped from `framework/src/Volo.Abp.Cli/`.
 - [/templates/overview](/templates/overview) — the startup templates that the release pipeline zips and uploads.

@@ -1,14 +1,14 @@
 ---
 title: "Quartz Job Provider: IScheduler, RetryStrategy, JobDataMap"
 sidebarTitle: "Quartz"
-description: "QuartzBackgroundJobManager schedules ABP jobs via IScheduler, stores args in JobDataMap and routes retries through AbpBackgroundJobQuartzOptions.RetryStrategy."
+description: "QuartzBackgroundJobManager schedules ABP jobs through IScheduler, stores args in JobDataMap and uses AbpBackgroundJobQuartzOptions.RetryStrategy."
 ---
 
 `Volo.Abp.BackgroundJobs.Quartz` is the **Quartz.NET adapter** for ABP's `IBackgroundJobManager`. It replaces the default manager with `QuartzBackgroundJobManager`, schedules jobs through Quartz's `IScheduler`, and uses `QuartzJobExecutionAdapter<TArgs>` (a Quartz `IJob`) to bridge back into `IBackgroundJobExecuter`. This page covers the manager, the adapter, the `JobDataMap` conventions, and the `AbpBackgroundJobQuartzOptions.RetryStrategy` delegate that implements the retry/back‑off math.
 
 ## Files
 
-```
+```text
 framework/src/Volo.Abp.BackgroundJobs.Quartz/Volo/Abp/BackgroundJobs/Quartz/
   AbpBackgroundJobQuartzOptions.cs
   AbpBackgroundJobsQuartzModule.cs

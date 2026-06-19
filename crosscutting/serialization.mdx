@@ -1,7 +1,7 @@
 ---
-title: "Object Serialization"
+title: "IObjectSerializer, DefaultObjectSerializer and Downstream"
 sidebarTitle: "Serialization"
-description: "The Volo.Abp.Serialization package: IObjectSerializer, IObjectSerializer<T>, DefaultObjectSerializer and how it underpins caching and messaging serializers."
+description: "The Volo.Abp.Serialization package: IObjectSerializer, IObjectSerializer<T>, DefaultObjectSerializer and how it underpins caching and messaging code."
 ---
 
 The ABP Framework ships a thin, format-agnostic object-serialization abstraction in the `Volo.Abp.Serialization` package. It is deliberately small: a non-generic `IObjectSerializer`, a per-type generic `IObjectSerializer<T>`, and a default implementation that defers to `System.Text.Json` when no per-type serializer is registered. This page covers the contracts, the registration trick used by `AbpSerializationModule`, the default JSON behaviour, and the *binary* serializer abstractions that downstream packages — Caching, EventBus, RabbitMQ, Redis — build on top.
@@ -237,7 +237,7 @@ The same pattern appears in messaging:
 | Package | File | Purpose |
 | --- | --- | --- |
 | `Volo.Abp.AzureServiceBus` | `Utf8JsonAzureServiceBusSerializer.cs` | Service Bus event payloads. |
-| `Volo.Abp.EventBus.Rebus` | `Utf8JsonRabbitMqSerializer.cs` | Distributed event bus envelopes. |
+| `Volo.Abp.EventBus.Rebus` | `Utf8JsonRabbitMqSerializer.cs` (defines `Utf8JsonRebusSerializer`) | Distributed event bus envelopes for the Rebus integration. |
 | `Volo.Abp.Kafka` | `Utf8JsonKafkaSerializer.cs` | Kafka record values. |
 | `Volo.Abp.RabbitMQ` | `Utf8JsonRabbitMqSerializer.cs` | Raw RabbitMQ messages. |
 | `Volo.Abp.Dapr` | `Utf8JsonDaprSerializer.cs` | Dapr pub/sub payloads. |

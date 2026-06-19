@@ -1,7 +1,7 @@
 ---
 title: "LDAP Bind Authentication: LdapManager and Setting Provider"
 sidebarTitle: "LDAP"
-description: "Inside Volo.Abp.Ldap — how LdapManager performs LDAP/LDAPS simple-bind auth and how ILdapSettingProvider reads connection metadata from the settings system."
+description: "Inside Volo.Abp.Ldap — how LdapManager performs LDAP/LDAPS simple-bind auth and ILdapSettingProvider reads connection metadata from Volo.Abp.Settings."
 ---
 
 `Volo.Abp.Ldap` in the ABP Framework is a thin LDAP simple-bind authentication client. It does not implement a full directory-services abstraction; instead it answers the single question "given a username and password, can we successfully bind to the configured LDAP server with these credentials?" That is the minimum the identity module needs to support enterprise login flows like Active Directory. This page covers the abstractions package, the `LdapManager` implementation built on the `LdapForNet` library, and how connection settings are sourced through `Volo.Abp.Settings` rather than `IOptions<T>`.

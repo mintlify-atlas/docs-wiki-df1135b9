@@ -1,5 +1,5 @@
 ---
-title: "@abp/blogging Pack: Volo.Blogging Razor Front-End"
+title: "@abp/blogging Pack: Volo.Blogging Razor JS Front-End"
 sidebarTitle: "Blogging"
 description: "Deep dive into the @abp/blogging pack — manifest, Volo.Blogging Razor pages, Toast UI Editor, owl carousel hero, and admin DataTables modal flow."
 ---
@@ -34,7 +34,7 @@ Four dependencies — the smallest "module" pack in `npm/packs/` after CMS Kit's
 
 The pack itself contains only `package.json` and `README.md`:
 
-```
+```text
 npm/packs/blogging/
 ├── README.md
 └── package.json
@@ -67,7 +67,7 @@ The auto-generated proxies expose `volo.blogging.*` and `volo.blogging.admin.*` 
 
 `modules/blogging/src/Volo.Blogging.Web/Pages/Blogs/` ships:
 
-```
+```text
 Pages/Blogs/
 ├── Members/
 │   └── Index.js
@@ -307,7 +307,7 @@ $('form[class="editFormClass"]').submit(function (event) {
 
 `modules/blogging/src/Volo.Blogging.Admin.Web/Pages/Blogging/Admin/Blogs/` is small — the standalone module only manages blogs (containers) from the admin UI; posts are written from the public side:
 
-```
+```text
 Pages/Blogging/Admin/Blogs/
 ├── create.js   ← modal init for create form
 ├── edit.js     ← modal init for edit form

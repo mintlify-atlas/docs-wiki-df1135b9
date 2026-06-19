@@ -1,5 +1,5 @@
 ---
-title: "Permission Management Module — Grants, Providers & REST API"
+title: "Permission Management Module — Grants, Providers, API"
 sidebarTitle: "Permission Mgmt"
 description: "Volo.Abp.PermissionManagement persists PermissionGrant rows, exposes IPermissionAppService, and pluggable IPermissionManagementProvider implementations."
 ---
@@ -10,7 +10,7 @@ The module is deliberately storage-aware: it ships dedicated `EntityFrameworkCor
 
 ## Project layout
 
-```
+```text
 modules/permission-management/src/
 ├── Volo.Abp.PermissionManagement.Domain.Shared/   Constants, error keys, integration events
 ├── Volo.Abp.PermissionManagement.Domain/          PermissionGrant, PermissionManager, providers
@@ -321,7 +321,7 @@ public class PermissionsController : AbpControllerBase, IPermissionAppService
 
 Example request from the Identity admin UI when toggling a role's permission:
 
-```
+```http
 PUT /api/permission-management/permissions?providerName=R&providerKey=admin
 Content-Type: application/json
 

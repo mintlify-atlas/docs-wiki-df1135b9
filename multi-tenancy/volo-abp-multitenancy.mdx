@@ -12,7 +12,7 @@ For HTTP-only concerns — middleware, cookie helper, route convention — read 
 
 ## Package layout
 
-```
+```text
 Volo.Abp.MultiTenancy/
 └── Volo/Abp/MultiTenancy/
     ├── AbpMultiTenancyModule.cs
@@ -34,7 +34,7 @@ Volo.Abp.MultiTenancy/
 
 The companion abstractions package contributes the contracts:
 
-```
+```text
 Volo.Abp.MultiTenancy.Abstractions/Volo/Abp/MultiTenancy/
     AbpMultiTenancyAbstractionsModule.cs   BasicTenantInfo.cs
     AbpMultiTenancyOptions.cs              CreateTenantEto.cs
@@ -170,7 +170,7 @@ public class BasicTenantInfo
 
 A `null` `TenantId` is *significant*: it means "explicitly set to host", which is different from "not set" (where `ICurrentTenantAccessor.Current` itself is `null`). The header comment in `ICurrentTenantAccessor.cs` documents this:
 
-```
+```text
 A null Current indicates that we haven't set it explicitly.
 A null Current.TenantId indicates that we have set null tenant id value explicitly.
 A non-null Current.TenantId indicates that we have set a tenant id value explicitly.

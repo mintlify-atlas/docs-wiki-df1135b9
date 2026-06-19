@@ -17,18 +17,18 @@ The 15 application-module trees host between 1 and 6 test projects each. The tot
 | `identity` | 6 | TestBase, Domain.Tests, Application.Tests, EntityFrameworkCore.Tests, MongoDB.Tests, AspNetCore.Tests |
 | `cms-kit` | 6 | TestBase, Domain.Tests, Application.Tests, EntityFrameworkCore.Tests, MongoDB.Tests, HttpApi.Client.ConsoleTestApp |
 | `docs` | 6 | TestBase, Domain.Tests, Application.Tests, EntityFrameworkCore.Tests, MongoDB.Tests, Web.Tests |
-| `feature-management` | 5 | TestBase, Domain.Tests, EntityFrameworkCore.Tests, MongoDB.Tests, HttpApi.Client.ConsoleTestApp |
-| `permission-management` | 5 | TestBase, Domain.Tests, EntityFrameworkCore.Tests, MongoDB.Tests, HttpApi.Client.ConsoleTestApp |
+| `feature-management` | 5 | TestBase, Domain.Tests, Application.Tests, EntityFrameworkCore.Tests, MongoDB.Tests |
+| `permission-management` | 5 | TestBase, Domain.Tests, Application.Tests, EntityFrameworkCore.Tests, MongoDB.Tests |
 | `tenant-management` | 5 | Same shape with Application.Tests |
 | `blogging` | 5 | Domain + Application + persistence variants |
-| `audit-logging` | 4 | TestBase, EntityFrameworkCore.Tests, MongoDB.Tests, plus one app/HttpApi |
-| `background-jobs` | 4 | TestBase, EntityFrameworkCore.Tests, MongoDB.Tests, HttpApi.Client.ConsoleTestApp |
+| `audit-logging` | 4 | TestBase, EntityFrameworkCore.Tests, MongoDB.Tests, plus `Volo.Abp.AuditLogging.Tests` |
+| `background-jobs` | 4 | TestBase, Domain.Tests, EntityFrameworkCore.Tests, MongoDB.Tests |
 | `blob-storing-database` | 4 | TestBase + persistence variants |
 | `openiddict` | 4 | Same shape |
 | `identityserver` | 4 | Same shape |
-| `setting-management` | 4 | TestBase + persistence variants |
-| `basic-theme` | 3 | A single Tests project plus support |
-| `account` | 1 | A single Web.Tests project |
+| `setting-management` | 4 | TestBase + persistence variants + `Volo.Abp.SettingManagement.Tests` |
+| `basic-theme` | 3 | Bootstrap Demo, Bootstrap Demo Tests, Theme.Basic Demo |
+| `account` | 1 | A single `Application.Tests` project |
 
 The presence/absence of `Application.Tests` correlates with whether the module exposes an Application layer; modules like `permission-management` keep most logic in the Domain layer and skip Application tests.
 
@@ -36,7 +36,7 @@ The presence/absence of `Application.Tests` correlates with whether the module e
 
 The identity module is the largest and most representative example. Its layout:
 
-```
+```text
 modules/identity/test/
 ├── Volo.Abp.Identity.TestBase/                  # not a test assembly, a shared library
 ├── Volo.Abp.Identity.Domain.Tests/

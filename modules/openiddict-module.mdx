@@ -1,7 +1,7 @@
 ---
 title: "OpenIddict Module — OIDC Server for ABP Framework"
 sidebarTitle: "OpenIddict"
-description: "Inside ABP Framework's OpenIddict module: application, scope, authorization, token aggregates and the AspNetCore server pipeline."
+description: "Inside ABP Framework's OpenIddict module: application, scope, authorization and token aggregates plus the AspNetCore server pipeline."
 ---
 
 The **OpenIddict** module is ABP Framework's preferred OpenID Connect / OAuth 2.0 authorization-server stack. It wraps the upstream [OpenIddict](https://documentation.openiddict.com/) library so that its application, authorization, scope and token entities are persisted through ABP repositories (EF Core or MongoDB), benefit from ABP's distributed eventing, and integrate cleanly with the [Identity module](/modules/identity) for user authentication. The code lives under `modules/openiddict/src/`. This page walks through every aggregate, the manager classes, the AspNetCore controller surface that exposes `/connect/...` endpoints, the token cleanup background worker, and the wildcard-domain customisations ABP adds on top of vanilla OpenIddict.

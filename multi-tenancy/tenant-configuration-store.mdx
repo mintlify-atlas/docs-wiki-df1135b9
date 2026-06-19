@@ -333,7 +333,7 @@ And a request resolved to tenant `acme`:
 | --- | --- | --- |
 | `ResolveAsync(null)` | `Server=acme-db;Database=Acme;...` | Tenant default present |
 | `ResolveAsync("Default")` | `Server=acme-db;Database=Acme;...` | Same as above |
-| `ResolveAsync("AbpIdentity")` | `Server=host-db;Database=HostIdentity;...` | Tenant has no `AbpIdentity` entry and falls back to tenant default which is empty for this key, then base `Options.ConnectionStrings.Default!` if the mapped DB is not marked `IsUsedByTenants` — the actual ladder includes the host's `AbpIdentity` via `base.ResolveAsync` |
+| `ResolveAsync("AbpIdentity")` | `Server=acme-db;Database=Acme;...` | Tenant has no `AbpIdentity` entry. No mapped database with `IsUsedByTenants` matches either, so the resolver falls through to the tenant's non-empty `Default` and returns `acme-db` *before* it would consult `base.ResolveAsync` |
 
 The exact fallback order (see ladder above) is:
 
